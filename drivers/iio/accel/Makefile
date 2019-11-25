@@ -56,3 +56,8 @@ st_accel-$(CONFIG_IIO_BUFFER) += st_accel_buffer.o
 
 obj-$(CONFIG_IIO_ST_ACCEL_I2C_3AXIS) += st_accel_i2c.o
 obj-$(CONFIG_IIO_ST_ACCEL_SPI_3AXIS) += st_accel_spi.o
+
+st_acc33-y := st_acc33_core.o st_acc33_buffer.o
+obj-$(CONFIG_IIO_ST_ACC33) += st_acc33.o
+obj-$(CONFIG_IIO_ST_ACC33_I2C) += st_acc33_i2c.o
+obj-$(CONFIG_IIO_ST_ACC33_SPI) += st_acc33_spi.o
