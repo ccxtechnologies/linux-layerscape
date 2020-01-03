@@ -1018,9 +1018,14 @@ static struct ath10k_dump_file_data *ath10k_coredump_build(struct ath10k *ar)
 	struct ath10k_ce_crash_hdr *ce_hdr;
 	struct ath10k_dump_file_data *dump_data;
 	struct ath10k_tlv_dump_data *dump_tlv;
+	struct ath10k_dbglog_entry_storage_user *dbglog_storage;
 	size_t hdr_len = sizeof(*dump_data);
 	size_t len, sofar = 0;
 	unsigned char *buf;
+	int tmp;
+
+	BUILD_BUG_ON(sizeof(struct ath10k_dbglog_entry_storage) !=
+		     sizeof(struct ath10k_dbglog_entry_storage_user));
 
 	len = hdr_len;
 
@@ -1033,6 +1038,18 @@ static struct ath10k_dump_file_data *ath10k_coredump_build(struct ath10k *ar)
 
 	if (test_bit(ATH10K_FW_CRASH_DUMP_RAM_DATA, &ath10k_coredump_mask))
 		len += sizeof(*dump_tlv) + crash_data->ramdump_buf_len;
+
+	len += sizeof(*dump_tlv) + sizeof(ar->debug.dbglog_entry_data);
+	len += sizeof(*dump_tlv) + sizeof(crash_data->stack_buf);
+	len += sizeof(*dump_tlv) + sizeof(crash_data->exc_stack_buf);
+
+	if (ar->running_fw->fw_file.ram_bss_addr &&
+	    ar->running_fw->fw_file.ram_bss_len)
+		len += sizeof(*dump_tlv) + ar->running_fw->fw_file.ram_bss_len;
+
+	if (ar->running_fw->fw_file.rom_bss_addr &&
+	    ar->running_fw->fw_file.rom_bss_len)
+		len += sizeof(*dump_tlv) + ar->running_fw->fw_file.rom_bss_len;
 
 	sofar += hdr_len;
 
@@ -1066,6 +1083,12 @@ static struct ath10k_dump_file_data *ath10k_coredump_build(struct ath10k *ar)
 	dump_data->ht_cap_info = cpu_to_le32(ar->ht_cap_info);
 	dump_data->vht_cap_info = cpu_to_le32(ar->vht_cap_info);
 	dump_data->num_rf_chains = cpu_to_le32(ar->num_rf_chains);
+	dump_data->stack_addr = cpu_to_le32(crash_data->stack_addr);
+	dump_data->exc_stack_addr = cpu_to_le32(crash_data->exc_stack_addr);
+	dump_data->rom_bss_addr =
+		cpu_to_le32(ar->running_fw->fw_file.rom_bss_addr);
+	dump_data->ram_bss_addr =
+		cpu_to_le32(ar->running_fw->fw_file.ram_bss_addr);
 
 	strlcpy(dump_data->fw_ver, ar->hw->wiphy->fw_version,
 		sizeof(dump_data->fw_ver));
@@ -1109,6 +1132,60 @@ static struct ath10k_dump_file_data *ath10k_coredump_build(struct ath10k *ar)
 		       crash_data->ramdump_buf_len);
 		sofar += sizeof(*dump_tlv) + crash_data->ramdump_buf_len;
 	}
+
+	/* Gather dbg-log */
+	tmp = sizeof(ar->debug.dbglog_entry_data);
+	dump_tlv = (struct ath10k_tlv_dump_data *)(buf + sofar);
+	dump_tlv->type = cpu_to_le32(ATH10K_FW_CRASH_DUMP_DBGLOG);
+	dump_tlv->tlv_len = cpu_to_le32(tmp);
+	dbglog_storage =
+		(struct ath10k_dbglog_entry_storage_user *)(dump_tlv->tlv_data);
+	memcpy(dbglog_storage->data, ar->debug.dbglog_entry_data.data,
+	       sizeof(dbglog_storage->data));
+	dbglog_storage->head_idx =
+		cpu_to_le32(ar->debug.dbglog_entry_data.head_idx);
+	dbglog_storage->tail_idx =
+		cpu_to_le32(ar->debug.dbglog_entry_data.tail_idx);
+	sofar += sizeof(*dump_tlv) + tmp;
+
+	/* Gather firmware stack dump */
+	tmp = sizeof(crash_data->stack_buf);
+	dump_tlv = (struct ath10k_tlv_dump_data *)(buf + sofar);
+	dump_tlv->type = cpu_to_le32(ATH10K_FW_CRASH_DUMP_STACK);
+	dump_tlv->tlv_len = cpu_to_le32(tmp);
+	memcpy(dump_tlv->tlv_data, crash_data->stack_buf, tmp);
+	sofar += sizeof(*dump_tlv) + tmp;
+
+	/* Gather firmware exception stack dump */
+	tmp = sizeof(crash_data->exc_stack_buf);
+	dump_tlv = (struct ath10k_tlv_dump_data *)(buf + sofar);
+	dump_tlv->type = cpu_to_le32(ATH10K_FW_CRASH_DUMP_EXC_STACK);
+	dump_tlv->tlv_len = cpu_to_le32(tmp);
+	memcpy(dump_tlv->tlv_data, crash_data->exc_stack_buf, tmp);
+
+	sofar += sizeof(*dump_tlv) + tmp;
+
+	if (ar->running_fw->fw_file.ram_bss_addr &&
+	    ar->running_fw->fw_file.ram_bss_len) {
+		tmp = ar->running_fw->fw_file.ram_bss_len;
+		dump_tlv = (struct ath10k_tlv_dump_data *)(buf + sofar);
+		dump_tlv->type = cpu_to_le32(ATH10K_FW_CRASH_DUMP_RAM_BSS);
+		dump_tlv->tlv_len = cpu_to_le32(tmp);
+		memcpy(dump_tlv->tlv_data, crash_data->ram_bss_buf, tmp);
+		sofar += sizeof(*dump_tlv) + tmp;
+	}
+
+	if (ar->running_fw->fw_file.rom_bss_addr &&
+	    ar->running_fw->fw_file.rom_bss_len) {
+		tmp = ar->running_fw->fw_file.rom_bss_len;
+		dump_tlv = (struct ath10k_tlv_dump_data *)(buf + sofar);
+		dump_tlv->type = cpu_to_le32(ATH10K_FW_CRASH_DUMP_ROM_BSS);
+		dump_tlv->tlv_len = cpu_to_le32(tmp);
+		memcpy(dump_tlv->tlv_data, crash_data->rom_bss_buf, tmp);
+		sofar += sizeof(*dump_tlv) + tmp;
+	}
+
+	WARN_ON(sofar != len);
 
 	spin_unlock_bh(&ar->data_lock);
 

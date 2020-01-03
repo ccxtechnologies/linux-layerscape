@@ -203,6 +203,14 @@ enum wmi_service {
 	WMI_SERVICE_TPC_STATS_FINAL,
 	WMI_SERVICE_RESET_CHIP,
 	WMI_SERVICE_SPOOF_MAC_SUPPORT,
+	WMI_SERVICE_TX_DATA_ACK_RSSI,
+	WMI_SERVICE_VDEV_DIFFERENT_BEACON_INTERVAL_SUPPORT,
+	WMI_SERVICE_THERM_THROT,
+	WMI_SERVICE_RTT_RESPONDER_ROLE,
+	WMI_SERVICE_PER_PACKET_SW_ENCRYPT,
+	WMI_SERVICE_REPORT_AIRTIME,
+
+	/* Remember to add the new value to wmi_service_name()! */
 
 	/* keep last */
 	WMI_SERVICE_MAX,
@@ -350,6 +358,13 @@ enum wmi_10_4_service {
 	WMI_10_4_SERVICE_HTT_MGMT_TX_COMP_VALID_FLAGS,
 	WMI_10_4_SERVICE_HOST_DFS_CHECK_SUPPORT,
 	WMI_10_4_SERVICE_TPC_STATS_FINAL,
+	WMI_10_4_SERVICE_CFR_CAPTURE_SUPPORT,
+	WMI_10_4_SERVICE_TX_DATA_ACK_RSSI,
+	WMI_10_4_SERVICE_CFR_CAPTURE_IND_MSG_TYPE_LEGACY,
+	WMI_10_4_SERVICE_PER_PACKET_SW_ENCRYPT,
+	WMI_10_4_SERVICE_PEER_TID_CONFIGS_SUPPORT,
+	WMI_10_4_SERVICE_VDEV_BCN_RATE_CONTROL,
+	WMI_10_4_SERVICE_VDEV_DIFFERENT_BEACON_INTERVAL_SUPPORT,
 };
 
 static inline char *wmi_service_name(int service_id)
@@ -463,6 +478,15 @@ static inline char *wmi_service_name(int service_id)
 	SVCSTR(WMI_SERVICE_HOST_DFS_CHECK_SUPPORT);
 	SVCSTR(WMI_SERVICE_TPC_STATS_FINAL);
 	SVCSTR(WMI_SERVICE_RESET_CHIP);
+	//SVCSTR(WMI_SERVICE_TX_DATA_ACK_RSSI);
+	//SVCSTR(WMI_SERVICE_VDEV_DIFFERENT_BEACON_INTERVAL_SUPPORT);
+	//SVCSTR(WMI_SERVICE_VDEV_DISABLE_4_ADDR_SRC_LRN_SUPPORT);
+	//SVCSTR(WMI_SERVICE_BB_TIMING_CONFIG_SUPPORT);
+	//SVCSTR(WMI_SERVICE_THERM_THROT);
+	//SVCSTR(WMI_SERVICE_RTT_RESPONDER_ROLE);
+	SVCSTR(WMI_SERVICE_PER_PACKET_SW_ENCRYPT);
+	//SVCSTR(WMI_SERVICE_REPORT_AIRTIME);
+
 	default:
 		return NULL;
 	}
@@ -557,6 +581,10 @@ static inline void wmi_10x_svc_map(const __le32 *in, unsigned long *out,
 	       WMI_SERVICE_RESET_CHIP, len);
 	SVCMAP(WMI_10X_SERVICE_HTT_MGMT_TX_COMP_VALID_FLAGS,
 	       WMI_SERVICE_HTT_MGMT_TX_COMP_VALID_FLAGS, len);
+	//SVCMAP(WMI_10X_SERVICE_BB_TIMING_CONFIG_SUPPORT,
+	//       WMI_SERVICE_BB_TIMING_CONFIG_SUPPORT, len);
+	//SVCMAP(WMI_10X_SERVICE_PER_PACKET_SW_ENCRYPT,
+	//       WMI_SERVICE_PER_PACKET_SW_ENCRYPT, len);
 }
 
 static inline void wmi_main_svc_map(const __le32 *in, unsigned long *out,
@@ -771,6 +799,18 @@ static inline void wmi_10_4_svc_map(const __le32 *in, unsigned long *out,
 	       WMI_SERVICE_HOST_DFS_CHECK_SUPPORT, len);
 	SVCMAP(WMI_10_4_SERVICE_TPC_STATS_FINAL,
 	       WMI_SERVICE_TPC_STATS_FINAL, len);
+	//SVCMAP(WMI_10_4_SERVICE_TX_DATA_ACK_RSSI,
+	//       WMI_SERVICE_TX_DATA_ACK_RSSI, len);
+	//SVCMAP(WMI_10_4_SERVICE_VDEV_DIFFERENT_BEACON_INTERVAL_SUPPORT,
+	//       WMI_SERVICE_VDEV_DIFFERENT_BEACON_INTERVAL_SUPPORT, len);	
+	//SVCMAP(WMI_10_4_SERVICE_VDEV_DISABLE_4_ADDR_SRC_LRN_SUPPORT,
+	//       WMI_SERVICE_VDEV_DISABLE_4_ADDR_SRC_LRN_SUPPORT, len);
+	//SVCMAP(WMI_10_4_SERVICE_RTT_RESPONDER_ROLE,
+	//       WMI_SERVICE_RTT_RESPONDER_ROLE, len);
+	SVCMAP(WMI_10_4_SERVICE_PER_PACKET_SW_ENCRYPT,
+	       WMI_SERVICE_PER_PACKET_SW_ENCRYPT, len);
+	//SVCMAP(WMI_10_4_SERVICE_REPORT_AIRTIME,
+	//       WMI_SERVICE_REPORT_AIRTIME, len);
 }
 
 #undef SVCMAP
@@ -1279,13 +1319,13 @@ enum wmi_10x_cmd_id {
 	WMI_10X_PDEV_PKTLOG_ENABLE_CMDID,
 	WMI_10X_PDEV_PKTLOG_DISABLE_CMDID,
 	WMI_10X_PDEV_SET_WMM_PARAMS_CMDID,
-	WMI_10X_PDEV_SET_HT_CAP_IE_CMDID,
+	WMI_10X_PDEV_SET_HT_CAP_IE_CMDID, /* 10 */
 	WMI_10X_PDEV_SET_VHT_CAP_IE_CMDID,
 	WMI_10X_PDEV_SET_BASE_MACADDR_CMDID,
 	WMI_10X_PDEV_SET_DSCP_TID_MAP_CMDID,
 	WMI_10X_PDEV_SET_QUIET_MODE_CMDID,
 	WMI_10X_PDEV_GREEN_AP_PS_ENABLE_CMDID,
-	WMI_10X_PDEV_GET_TPC_CONFIG_CMDID,
+	WMI_10X_PDEV_GET_TPC_CONFIG_CMDID, /* 16 */
 
 	/* VDEV(virtual device) specific commands */
 	WMI_10X_VDEV_CREATE_CMDID,
@@ -1298,7 +1338,7 @@ enum wmi_10x_cmd_id {
 	WMI_10X_VDEV_STANDBY_RESPONSE_CMDID,
 	WMI_10X_VDEV_RESUME_RESPONSE_CMDID,
 	WMI_10X_VDEV_SET_PARAM_CMDID,
-	WMI_10X_VDEV_INSTALL_KEY_CMDID,
+	WMI_10X_VDEV_INSTALL_KEY_CMDID, /* 27 */
 
 	/* peer specific commands */
 	WMI_10X_PEER_CREATE_CMDID,
@@ -1308,7 +1348,7 @@ enum wmi_10x_cmd_id {
 	WMI_10X_PEER_ASSOC_CMDID,
 	WMI_10X_PEER_ADD_WDS_ENTRY_CMDID,
 	WMI_10X_PEER_REMOVE_WDS_ENTRY_CMDID,
-	WMI_10X_PEER_MCAST_GROUP_CMDID,
+	WMI_10X_PEER_MCAST_GROUP_CMDID, /* 35 */
 
 	/* beacon/management specific commands */
 
@@ -1316,7 +1356,7 @@ enum wmi_10x_cmd_id {
 	WMI_10X_BCN_PRB_TMPL_CMDID,
 	WMI_10X_BCN_FILTER_RX_CMDID,
 	WMI_10X_PRB_REQ_FILTER_RX_CMDID,
-	WMI_10X_MGMT_TX_CMDID,
+	WMI_10X_MGMT_TX_CMDID, /* 40 */
 
 	/* commands to directly control ba negotiation directly from host. */
 	WMI_10X_ADDBA_CLEAR_RESP_CMDID,
@@ -1402,6 +1442,55 @@ enum wmi_10x_cmd_id {
 	WMI_10X_GPIO_CONFIG_CMDID,
 	WMI_10X_GPIO_OUTPUT_CMDID,
 
+	/* CT Firmware only, trying to add new WMI features w/out breaking backwards compat. */
+	/* add new CMDIDs here (out-of-order backport from 10.2) */
+	/**update a wds  (4 address ) entry. */
+	WMI_10X_PEER_UPDATE_WDS_ENTRY_CMDID,
+	/** request to start/stop keep-alive frame */
+	WMI_10X_RTT_KEEPALIVE_CMDID,
+	WMI_10X_VDEV_RATEMASK_CMDID,
+
+	/** Enable/Disable Smart Antenna */
+	WMI_10X_PDEV_SMART_ANT_ENABLE_CMDID,
+	/** Set Smart Antenna RX antenna*/
+	WMI_10X_PDEV_SMART_ANT_SET_RX_ANTENNA_CMDID,
+	/** Set Smart Antenna TX antenna*/
+	WMI_10X_PEER_SMART_ANT_SET_TX_ANTENNA_CMDID,
+	/** Set Smart Antenna TX train info */
+	WMI_10X_PEER_SMART_ANT_SET_TRAIN_INFO_CMDID,
+	/** Set SA node config options */
+	WMI_10X_PEER_SMART_ANT_SET_NODE_CONFIG_OPS_CMDID,
+	/* For fw recovery test command */
+	WMI_10X_FORCE_FW_HANG_CMDID,
+
+	/** Override the antenna switch table */
+	WMI_10X_PDEV_SET_ANTENNA_SWITCH_TABLE_CMDID,
+	/** Override the CTL table */
+	WMI_10X_PDEV_SET_CTL_TABLE_CMDID,
+	/** Override the array gain table */
+	WMI_10X_PDEV_SET_MIMOGAIN_TABLE_CMDID,
+	/** Set/Get the rate power table in OTP */
+	WMI_10X_PDEV_RATEPWR_TABLE_CMDID,
+	/** En/disable the rate power and chain mask table in FW*/
+	WMI_10X_PDEV_RATEPWR_CHAINMSK_TABLE_CMDID,
+
+	WMI_10X_PDEV_GET_INFO,
+	WMI_10X_VDEV_GET_INFO,
+	/** ATF VDEV REQUEST commands. */
+	WMI_10X_VDEV_ATF_REQUEST_CMDID,
+	/** ATF PEER REQUEST commands. */
+	WMI_10X_PEER_ATF_REQUEST_CMDID,
+
+	/** Get Thermal management params **/
+	WMI_10X_PDEV_GET_TEMPERATURE_CMDID,
+	WMI_10X_MU_CAL_START_CMDID,
+	WMI_10X_SET_LTEU_CONFIG_CMDID,
+	WMI_10X_SET_CCA_PARAMS_CMDID,
+	WMI_10X_PDEV_BSS_CHAN_INFO_REQUEST,
+
+	WMI_PDEV_SET_SPECIAL_CMDID = WMI_10X_END_CMDID - 101, /* CT only:  special hack (cts/slot/cifs/ack timers, etc) */
+	WMI_NOP = WMI_10X_END_CMDID - 100, /* CT only:  wmi transport keep-alive, basically */
+
 	WMI_10X_PDEV_UTF_CMDID = WMI_10X_END_CMDID - 1,
 };
 
@@ -1465,6 +1554,11 @@ enum wmi_10x_event_id {
 	WMI_10X_PDEV_TPC_CONFIG_EVENTID,
 
 	WMI_10X_GPIO_INPUT_EVENTID,
+
+	WMI_10_1_GENERIC_BUFFER_EVENTID = 36893, /* Newer CT firmware:  April 2, 2019 */
+	WMI_10_1_PDEV_TEMPERATURE_EVENTID = 36898, /* Newer CT firmware */
+	WMI_10_1_PDEV_BSS_CHAN_INFO_EVENTID = 36900, /* Newer CT firmware */
+	WMI_10_1_BEACON_TX_EVENTID = WMI_10X_END_EVENTID - 4, /* CT FW, beacon tx completed */
 	WMI_10X_PDEV_UTF_EVENTID = WMI_10X_END_EVENTID - 1,
 };
 
@@ -1888,6 +1982,11 @@ enum wmi_10_4_event_id {
 	WMI_10_4_HOST_SWFDA_EVENTID,
 	WMI_10_4_ESP_ESTIMATE_EVENTID,
 	WMI_10_4_DFS_STATUS_CHECK_EVENTID,
+
+
+	WMI_10_4_BEACON_TX_EVENTID = WMI_10_4_END_EVENTID - 4, /* CT FW, beacon tx completed */
+	WMI_10_4_TXBF_CV_MESG_EVENTID = WMI_10_4_END_EVENTID - 3, /* CT Specific event ID */
+	WMI_10_4_CSI_MESG_EVENTID = WMI_10_4_END_EVENTID - 2, /* CT Specific event ID */
 	WMI_10_4_PDEV_UTF_EVENTID = WMI_10_4_END_EVENTID - 1,
 };
 
@@ -1988,7 +2087,9 @@ struct wmi_channel {
 	union {
 		__le32 reginfo1;
 		struct {
+			/* note: power unit is 1 dBm */
 			u8 antenna_max;
+			/* note: power unit is 0.5 dBm */
 			u8 max_tx_power;
 		} __packed;
 	} __packed;
@@ -2008,6 +2109,7 @@ struct wmi_channel_arg {
 	u32 min_power;
 	u32 max_power;
 	u32 max_reg_power;
+	/* note: power unit is 1 dBm */
 	u32 max_antenna_gain;
 	u32 reg_class_id;
 	enum wmi_phy_mode mode;
@@ -2025,6 +2127,13 @@ enum wmi_channel_change_cause {
 #define WMI_CHAN_FLAG_DFS            (1 << 10)
 #define WMI_CHAN_FLAG_ALLOW_HT       (1 << 11)
 #define WMI_CHAN_FLAG_ALLOW_VHT      (1 << 12)
+#define WMI_CHAN_FLAG_HALF           (1 << 13)
+#define WMI_CHAN_FLAG_QUARTER        (1 << 14)
+#define WMI_CHAN_FLAG_NO_RESERVE_CH  (1 << 31) /* CT firmware only, do not reserve channel.
+						* Takes 200+ms to grab reservation when starting
+						* vdev, and I think it is handled elsewhere by the
+						* stack and/or supplicant anyway. --Ben
+						*/
 
 /* Indicate reason for channel switch */
 #define WMI_CHANNEL_CHANGE_CAUSE_CSA (1 << 13)
@@ -2318,7 +2427,12 @@ struct wmi_resource_config {
 	 *   tx with a reduced number of chains if no clients are associated.
 	 *   This configuration parameter specifies the nominal chain-mask that
 	 *   should be used when not operating with a reduced set of tx chains.
+	 *
+	 *  NOTE:  Stored as uint8 internally in firmware, so I am going to
+	 *  steal some high bits to allow configuring the number of RAM
+	 *  rate-ctrl objects for CT firmware. --Ben
 	 */
+	/* mask >> 24:  rate-ctrl-objs-in-RAM */
 	__le32 tx_chain_mask;
 
 	/*
@@ -2354,7 +2468,35 @@ struct wmi_resource_config {
 	 *   MAC can decap to RAW (no decap), native wifi or Ethernet types
 	 *   THis setting also determines the default TX behavior, however TX
 	 *   behavior can be modified on a per VAP basis during VAP init
+	 *
+	 *  NOTE:  Stealing some of this field for flags, only usable when
+	 *         running "CT" firmware.
+	 *   first byte: rx_decap_mode
+	 *   second byte:  reserved
 	 */
+	#define ATH10K_RX_DECAP_MODE_MASK 0xff
+	/*  Use software rx crypt.  This disables rx checksumming
+	 *  and may turn off some firmware/hardware optimizations for
+	 *  normal use case.  BUT, it does allow us to run multiple
+	 *  stations connected to the same AP.  This flag causes
+	 *  rx encapsulation to be 'raw', and tx mode to be native-wifi.
+	 *  You should probably not enable this unless you need to
+	 *  connect multiple stations to same AP.
+	 */
+	#define ATH10k_USE_SW_RX_CRYPT    0x10000
+	/* Ask firmware to include tx-rate in completion messages. */
+	#define ATH10k_USE_TXCOMPL_TXRATE 0x20000
+	/* Disable Wake-on-Wireless logic.  Saves some RAM, for those
+	 * that do not need WoW.
+	 */
+	#define ATH10k_DISABLE_WOW        0x40000
+	/* Ask CT firmware to send back per-chain management frame RSSI info */
+	#define ATH10k_MGT_CHAIN_RSSI_OK  0x80000
+	#define ATH10k_VDEV_CT_STATS_OK  0x100000
+        #define ATH10k_VDEV_CT_STA_MODE  0x200000 /* Try to use keys a bit like proxy-sta so we can do hw-crypt
+						   * with many stations to same AP. */
+	#define ATH10k_USE_TXCOMPL_TXRATE2 0x400000 /* Ask firmware for more extended tx-status in completion msgs */
+	/* NOTE:  High 8 bits are spoken for, 'features' */
 	__le32 rx_decap_mode;
 
 	/* what is the maximum number of scan requests that can be queued */
@@ -3210,6 +3352,14 @@ struct wmi_start_scan_arg {
  */
 #define WMI_SCAN_ADD_SPOOFED_MAC_IN_PROBE_REQ   0x1000
 
+/* CT Firmware only, v15 and higher */
+/* Don't advertise any HT support in scan req */
+#define WMI_SCAN_DISABLE_HT    0x40000000
+#define WMI_SCAN_DISABLE_HT_4  0x00400000 /* 10.4 stole the bits I was using in 10.1. --Ben */
+/* Don't advertise any VHT support in scan req */
+#define WMI_SCAN_DISABLE_VHT   0x80000000
+#define WMI_SCAN_DISABLE_VHT_4 0x00800000
+
 /* WMI_SCAN_CLASS_MASK must be the same value as IEEE80211_SCAN_CLASS_MASK */
 #define WMI_SCAN_CLASS_MASK 0xFF000000
 
@@ -3276,6 +3426,7 @@ enum wmi_scan_completion_reason {
 	WMI_SCAN_REASON_PREEMPTED,
 	WMI_SCAN_REASON_TIMEDOUT,
 	WMI_SCAN_REASON_INTERNAL_FAILURE,
+	WMI_SCAN_REASON_BUSY = 13, /* A_EBUSY, CT firmware at least. */
 	WMI_SCAN_REASON_MAX,
 };
 
@@ -4450,6 +4601,50 @@ struct wmi_pdev_stats_peer {
 	__le32 dummy;
 } __packed;
 
+
+#define REG_DUMP_NONE         0
+#define MAC_FILTER_ADDR_L32   1
+#define MAC_FILTER_ADDR_U16   2
+#define DCU_SLOT_TIME         3
+#define PHY_BB_MODE_SELECT    4
+#define PCU_BSSID_L32         5
+#define PCU_BSSID_U16         6
+#define PCU_BSSID2_L32        7
+#define PCU_BSSID2_U16        8
+#define PCU_STA_ADDR_U16      9
+#define MAC_DMA_CFG          10
+#define MAC_DMA_TXCFG        11
+#define PCU_STA_ADDR_L32     12
+#define PCU_RXFILTER         13
+#define PHY_BB_GEN_CONTROLS  14
+#define DMA_IMR              15
+#define DMA_TXRX_IMR         16
+#define SW_POWERMODE         17
+#define SW_CHAINMASK         18 /* tx is high 16 bits, rx is low 16 bits */
+#define SW_OPMODE            19
+#define SW_RXFILTER          20
+#define SW_LONG_RETRIES      21 /* DATA packet retries */
+#define SW_SHORT_RETRIES     22 /* RTS packet retries */
+#define ADC_TEMP             23 /* ADC Temperature readings. */
+#define NF_CHAINS            24 /* noise floor for chains */
+
+
+#define DBG_REG_DUMP_COUNT       25 /* max number of registers we know about. */
+
+struct ath10k_reg_dump_pair {
+	__le32 reg_id;
+	__le32 reg_val;
+};
+
+struct ath10k_reg_dump {
+	__le16 count;
+	__le16 unused;
+	struct ath10k_reg_dump_pair regpair[DBG_REG_DUMP_COUNT + 20];
+};
+
+/* These values are a bitmap, but 10.1.x (at least) firmware will not properly
+ * handle multiple values OR'd together.
+ */
 enum wmi_stats_id {
 	WMI_STAT_PEER = BIT(0),
 	WMI_STAT_AP = BIT(1),
@@ -4457,7 +4652,12 @@ enum wmi_stats_id {
 	WMI_STAT_VDEV = BIT(3),
 	WMI_STAT_BCNFLT = BIT(4),
 	WMI_STAT_VDEV_RATE = BIT(5),
+	WMI_REQUEST_REGISTER_DUMP = BIT(7), /* 0x80, CT Firmware only, request register dump. */
+	WMI_REQUEST_STAT_CUSTOM = 0xF0000000, /* CT Firmware stats hack, in this case,
+					       * vdev-id is 'stats-id' for requests */
 };
+
+#define WMI_STAT_CUSTOM_RX_REORDER_STATS 0
 
 enum wmi_10_4_stats_id {
 	WMI_10_4_STAT_PEER		= BIT(0),
@@ -4465,6 +4665,72 @@ enum wmi_10_4_stats_id {
 	WMI_10_4_STAT_INST		= BIT(2),
 	WMI_10_4_STAT_PEER_EXTD		= BIT(3),
 	WMI_10_4_STAT_VDEV_EXTD		= BIT(4),
+};
+
+/*
+ * Rx reorder statistics
+ * NB: all the fields must be defined in 4 octets size.
+ */
+struct ath10k_rx_reorder_stats {
+	/* Non QoS MPDUs received */
+	u32 deliver_non_qos; /* not set in wave-2 currently */
+	/* MPDUs received in-order */
+	u32 deliver_in_order;
+	/* Flush due to reorder timer expired */
+	u32 deliver_flush_timeout;
+	/* Flush due to move out of window */
+	u32 deliver_flush_oow;
+	/* Flush due to DELBA */
+	u32 deliver_flush_delba;
+	/* MPDUs dropped due to FCS error */
+	u32 fcs_error;
+	/* MPDUs dropped due to monitor mode non-data packet */
+	u32 mgmt_ctrl;
+	/* MPDUs dropped due to invalid peer */
+	u32 invalid_peer;
+	/* MPDUs dropped due to duplication (non aggregation) */
+	u32 dup_non_aggr;
+	/* MPDUs dropped due to processed before */
+	u32 dup_past;
+	/* MPDUs dropped due to duplicate in reorder queue */
+	u32 dup_in_reorder;
+	/* Reorder timeout happened */
+	u32 reorder_timeout;
+	/* invalid bar ssn */
+	u32 invalid_bar_ssn;
+	/* reorder reset due to bar ssn */
+	u32 ssn_reset;
+
+	/* Added by Ben */
+	u32 frag_invalid_peer;
+	u32 frag_fcs_error;
+	u32 frag_ok;
+	u32 frag_discards;
+
+	u32 rx_chatter;
+	u32 tkip_mic_error;
+	u32 tkip_decrypt_error;
+	u32 mpdu_length_error;
+	u32 non_frag_unicast_ok;
+
+	u32 rx_flush_ind; // Flushed these due to timeout, etc.
+	u32 rx_flush_ie_add; // Flushed these due to timeout, etc
+
+	/* Wave-2 specific */
+	u32 rx_mesh_wrong_dest;
+	u32 rx_mesh_filter_ra;
+	u32 rx_mesh_filter_fromds;
+	u32 rx_mesh_filter_tods;
+	u32 rx_mesh_filter_nods;
+	u32 rx_radar_fft_war;
+	u32 rx_drop_encrypt_required;
+	u32 rx_mpdu_tid_err;
+	u32 rx_ba_statemachine_err;
+	u32 rx_drop_replay;
+
+	u32 rx_non_data_drop_no_bufs; /* We had no htt buffer space to send non-data
+				       * packet descriptors, so frames were dropped.  Stock
+				       * FW just asserts in this case, btw. */
 };
 
 struct wlan_inst_rssi_args {
@@ -4475,7 +4741,7 @@ struct wlan_inst_rssi_args {
 struct wmi_request_stats_cmd {
 	__le32 stats_id;
 
-	__le32 vdev_id;
+	__le32 vdev_id; /* Or custom-stat identifier if stats_id == WMI_REQUEST_STAT_CUSTOM, CT FW only */
 
 	/* peer MAC address */
 	struct wmi_mac_addr peer_macaddr;
@@ -4504,7 +4770,7 @@ struct wmi_stats_event {
 	 * number of pdev stats event structures
 	 * (wmi_pdev_stats) 0 or 1
 	 */
-	__le32 num_pdev_stats;
+	__le32 num_pdev_stats; /* Or custom-stats-type of stats_id == WMI_REQUEST_STAT_CUSTOM */
 	/*
 	 * number of vdev stats event structures
 	 * (wmi_vdev_stats) 0 or max vdevs
@@ -4581,6 +4847,12 @@ struct wmi_pdev_stats_mem {
 	__le32 iram_free;
 } __packed;
 
+struct wmi_pdev_stats_mem_10_4 {
+	__le32 iram_free;
+	__le32 dram_free;
+	__le32 sram_free;
+} __packed;
+
 struct wmi_10_2_pdev_stats {
 	struct wmi_pdev_stats_base base;
 	struct wmi_pdev_stats_tx tx;
@@ -4596,9 +4868,9 @@ struct wmi_10_4_pdev_stats {
 	struct wmi_pdev_stats_base base;
 	struct wmi_10_4_pdev_stats_tx tx;
 	struct wmi_pdev_stats_rx rx;
+	__le32 pdev_rx_timeout;
 	__le32 rx_ovfl_errs;
-	struct wmi_pdev_stats_mem mem;
-	__le32 sram_free_size;
+	struct wmi_pdev_stats_mem_10_4 mem;
 	struct wmi_pdev_stats_extra extra;
 } __packed;
 
@@ -4647,6 +4919,12 @@ struct wmi_peer_stats {
 struct wmi_10x_peer_stats {
 	struct wmi_peer_stats old;
 	__le32 peer_rx_rate;
+} __packed;
+
+struct wmi_10x_peer_stats_ct_ext {
+	struct wmi_peer_stats old;
+	__le32 peer_rx_rate;
+	__le32 rx_duration;
 } __packed;
 
 struct wmi_10_2_peer_stats {
@@ -4905,7 +5183,13 @@ struct wmi_vdev_install_key_cmd {
 	__le32 key_idx;
 	__le32 key_flags;
 	__le32 key_cipher; /* %WMI_CIPHER_ */
-	struct wmi_key_seq_counter key_rsc_counter;
+	struct wmi_key_seq_counter key_rsc_counter; /* ignored unless WAPI by (most?) stock FW.  CT
+						     * firmware will set PN to this value if high bit of high
+						     * value is set to 0x1 (PN is 48-bits, so the actual PN set
+						     * will be just the lower 48 bits.
+						     * Wave-2 firmware only at this point, April 8 2019
+						     * build and later.
+						     */
 	struct wmi_key_seq_counter key_global_rsc_counter;
 	struct wmi_key_seq_counter key_tsc_counter;
 	u8 wpi_key_rsc_counter[16];
@@ -5283,6 +5567,8 @@ enum wmi_10x_vdev_param {
 	WMI_10X_VDEV_PARAM_MCAST2UCAST_SET,
 	/* Enable/Disable RTS-CTS */
 	WMI_10X_VDEV_PARAM_ENABLE_RTSCTS,
+	/** Total number of HW retries */
+	WMI_10X_VDEV_PARAM_RC_NUM_RETRIES,
 
 	WMI_10X_VDEV_PARAM_AP_DETECT_OUT_OF_SYNC_SLEEPING_STA_TIME_SECS,
 
@@ -5826,6 +6112,69 @@ enum wmi_sta_powersave_param {
 	WMI_STA_PS_PARAM_UAPSD = 4,
 };
 
+
+enum {
+    WMI_BUFFER_TYPE_RATEPWR_TABLE,
+    WMI_BUFFER_TYPE_CTL_TABLE,
+};
+
+struct wmi_generic_buffer_event {
+	__le32 buf_type; /* See enum above */
+	__le32 frag_id;
+	__le32 more_frag;
+	__le32 buf_len;
+	__le32 buf_info[0];
+};
+
+/* This is returned when reading the CTL table */
+struct qca9880_power_ctrl {
+	/* Not sure this can be made public knowledge, so leaving opaque
+	 * for now. --Ben
+	 */
+	u8 data[72 + 72 + 144 + 144];
+};
+
+/* Used by: WMI_PDEV_SET_CTL_TABLE_CMDID */
+struct qca9880_set_ctl_table_cmd {
+	/** len of CTL info */
+	__le32 ctl_len; /* in bytes.  This may be ignored in firmware,
+			 * make sure ctl_info data is sizeof(qca9880_power_ctl) */
+	/** ctl array (len adjusted to  number of words) */
+	__le32 ctl_info[1]; /* data would be the qca9880_power_ctl table above */
+};
+
+/* Used by:   WMI_PDEV_SET_MIMOGAIN_TABLE_CMDID */
+struct qca9880_mimo_gain_table {
+	/******************************************************************************
+	 *Bit 7:0 len of array gain table
+	 *Bit 8   bypass multi chain gain or not
+	 ******************************************************************************/
+	__le32 mimogain_info;
+	/** array gain table(s) (len adjusted to  number of words) */
+	__le32 arraygain_tbl[0]; /* real length is based on 'len' above */
+};
+
+struct qc988xxEepromRateTbl {
+	/* Keep opaque, not sure this can be made public. */
+	__le32 data[99];
+};
+
+#define RATEPWR_TABLE_OPS_SET 0
+#define RATEPWR_TABLE_OPS_GET 1
+#define RATEPWR_TABLE_OPS_GET_CTL 2
+/* For 'get', only the 'op' is paid attention to.  The result comes
+ * back as a WMI message (qc98xxEepromRateTbl, or qca9880_power_ctrl for 'GET_CTL')
+ * For set, send the qc98xxEepromRateTbl in binary form.
+ */
+struct qca9880_pdev_ratepwr_table_cmd {
+	/** operation */
+	__le32 op; /* see GET/SET defines above */
+	/** len of ratepwr table */
+	__le32 ratepwr_len;
+	/** rate power table (len adjusted to number of words) */
+	__le32 ratepwr_tbl[1];
+};
+
 struct wmi_sta_powersave_param_cmd {
 	__le32 vdev_id;
 	__le32 param_id; /* %WMI_STA_PS_PARAM_ */
@@ -5958,6 +6307,19 @@ struct wmi_bcn_info {
 	struct wmi_tim_info tim_info;
 	struct wmi_p2p_noa_info p2p_noa_info;
 } __packed;
+
+/* CT FW only */
+struct wmi_beacon_tx_event {
+	__le32 vdev_id;
+	__le32 tx_status;
+	u8 mpdus_tried;
+	u8 mpdus_failed;
+	u8 tx_rate_code;
+	u8 tx_rate_flags;
+	u8 tsFlags; /* WHAL_TXS_FLAG_TSF_TIME_FILTERED, etc */
+	u8 future8[3];
+	__le32 future[2];
+};
 
 struct wmi_host_swba_event {
 	__le32 vdev_map;
@@ -6148,8 +6510,22 @@ enum wmi_peer_param {
 	WMI_PEER_CHAN_WIDTH = 0x4,
 	WMI_PEER_NSS        = 0x5,
 	WMI_PEER_USE_4ADDR  = 0x6,
+	/** Enable extended peer stats */
+	WMI_PEER_EXT_STATS_ENABLE = 0x7,
+	/*Use FIXED Pwr */
+	WMI_PEER_USE_FIXED_PWR = 0x8,
+	/* Set peer fixed rate */
+	WMI_PEER_PARAM_FIXED_RATE = 0x9,
 	WMI_PEER_DEBUG      = 0xa,
+	/* peer NSS for VHT160 - Extended NSS support */
+	WMI_PEER_NSS_VHT160 = 0xb,
+	/* peer NSS for VHT160 - Extended NSS support */
+	WMI_PEER_NSS_VHT80_80 = 0xc,
 	WMI_PEER_PHYMODE    = 0xd,
+
+	/* Whitelist peer TIDs */
+	WMI_PEER_SET_MU_WHITELIST =0x10,
+
 	WMI_PEER_DUMMY_VAR  = 0xff, /* dummy parameter for STA PS workaround */
 };
 
@@ -6269,6 +6645,7 @@ enum wmi_10x_peer_flags {
 	WMI_10X_PEER_SPATIAL_MUX = 0x00200000,
 	WMI_10X_PEER_VHT = 0x02000000,
 	WMI_10X_PEER_80MHZ = 0x04000000,
+	WMI_10X_PEER_PMF    = 0x10000000,
 	WMI_10X_PEER_160MHZ = 0x20000000
 };
 
@@ -6316,6 +6693,8 @@ enum wmi_10_2_peer_flags {
 
 struct wmi_common_peer_assoc_complete_cmd {
 	struct wmi_mac_addr peer_macaddr;
+#define WMI_ASSOC_FLG_EXT (1<<31) /* Extended info is defined, CT firmware ver 15+ only,
+				   * packed into vdev_id */
 	__le32 vdev_id;
 	__le32 peer_new_assoc; /* 1=assoc, 0=reassoc */
 	__le32 peer_associd; /* 16 LSBs */
@@ -6347,6 +6726,26 @@ struct wmi_10_1_peer_assoc_complete_cmd {
 	struct wmi_common_peer_assoc_complete_cmd cmd;
 } __packed;
 
+struct wmi_ct_assoc_overrides {
+	/* CT firmware ver 15+ only */
+#define PEER_ASSOC_EXT_USE_OVERRIDES (1<<0)
+#define PEER_ASSOC_EXT_IGNORE_MCS_4_NSS_MASK (1<<1)
+#define PEER_ASSOC_EXT_LEN_32        (1<<2) /* Has 32-override bytes */
+	__le32 ext_flags;
+
+#define RATE_OVERRIDES_COUNT 32
+	/* Space for 256 rates.  If rate_overrides_set is 1,
+	 * any rate NOT specified in rate_overrides will be
+	 * disabled.
+	 */
+	u8 rate_overrides[RATE_OVERRIDES_COUNT];
+} __packed;
+
+struct wmi_10_1_peer_assoc_complete_cmd_ct {
+	struct wmi_10_1_peer_assoc_complete_cmd cmd;
+	struct wmi_ct_assoc_overrides overrides;
+} __packed;
+
 #define WMI_PEER_ASSOC_INFO0_MAX_MCS_IDX_LSB 0
 #define WMI_PEER_ASSOC_INFO0_MAX_MCS_IDX_MASK 0x0f
 #define WMI_PEER_ASSOC_INFO0_MAX_NSS_LSB 4
@@ -6359,10 +6758,27 @@ struct wmi_10_2_peer_assoc_complete_cmd {
 
 #define PEER_BW_RXNSS_OVERRIDE_OFFSET  31
 
+struct wmi_10_2_peer_assoc_complete_cmd_ct {
+	struct wmi_10_2_peer_assoc_complete_cmd cmd;
+	struct wmi_ct_assoc_overrides overrides;
+} __packed;
+
 struct wmi_10_4_peer_assoc_complete_cmd {
 	struct wmi_10_2_peer_assoc_complete_cmd cmd;
 	__le32 peer_bw_rxnss_override;
 } __packed;
+
+struct wmi_10_4_peer_assoc_complete_cmd_ct {
+	struct wmi_10_4_peer_assoc_complete_cmd cmd;
+	struct wmi_ct_assoc_overrides overrides;
+} __packed;
+
+struct wmi_vdev_stats_ct {
+    u32 vdev_id;
+    u32 size; /* size in bytes of this struct */
+    u32 tsf_lo;
+    u32 tsf_hi;
+};
 
 struct wmi_peer_assoc_complete_arg {
 	u8 addr[ETH_ALEN];
@@ -6383,6 +6799,10 @@ struct wmi_peer_assoc_complete_arg {
 	enum wmi_phy_mode peer_phymode;
 	struct wmi_vht_rate_set_arg peer_vht_rates;
 	u32 peer_bw_rxnss_override;
+
+	/* CT firmware only (beta-15 and higher ) */
+	bool has_rate_overrides;
+	u8 rate_overrides[RATE_OVERRIDES_COUNT];
 };
 
 struct wmi_peer_add_wds_entry_cmd {
@@ -6428,6 +6848,22 @@ struct wmi_10_4_chan_info_event {
 
 struct wmi_peer_sta_kickout_event {
 	struct wmi_mac_addr peer_macaddr;
+} __packed;
+
+struct wmi_txbf_cv_event {
+	struct wmi_mac_addr peer_macaddr;
+	u16 vdev_id;
+	u16 cv_size;
+	u16 cv_record_idx;
+	u16 cv_record_size;
+	u8 pool_idx;
+	u8 cv_type;
+	u8 mu_mimo;
+	u8 Nc;
+	u8 BW;
+	u8 Nr;
+	u8 state;
+	u8 unused;
 } __packed;
 
 #define WMI_CHAN_INFO_FLAG_COMPLETE BIT(0)
@@ -6623,6 +7059,7 @@ struct wmi_tlv_mgmt_tx_compl_ev_arg {
 struct wmi_mgmt_rx_ev_arg {
 	__le32 channel;
 	__le32 snr;
+	u8 rssi_ctl[4];
 	__le32 rate;
 	__le32 phy_mode;
 	__le32 buf_len;
@@ -6642,15 +7079,22 @@ struct wmi_ch_info_ev_arg {
 	__le32 rx_frame_count;
 };
 
+/* From 10.4 firmware, not sure all have the same values. */
+enum wmi_vdev_start_status {
+        WMI_VDEV_START_OK = 0,
+        WMI_VDEV_START_CHAN_INVALID,
+};
+
 struct wmi_vdev_start_ev_arg {
 	__le32 vdev_id;
 	__le32 req_id;
 	__le32 resp_type; /* %WMI_VDEV_RESP_ */
-	__le32 status;
+	__le32 status; /* See wmi_vdev_start_status enum above */
 };
 
 struct wmi_peer_kick_ev_arg {
 	const u8 *mac_addr;
+	u16 unused_hi; /* top 16 bits of 47-32, used to pass info back to host by CT firmware */
 };
 
 struct wmi_swba_ev_arg {
@@ -6708,6 +7152,12 @@ struct wmi_svc_avail_ev_arg {
 	const __le32 *service_map_ext;
 };
 
+struct ath10k_fw_dbglog_report {
+	__le32 dropped_count;
+	__le32 messages[];
+} __packed;
+
+
 struct wmi_rdy_ev_arg {
 	__le32 sw_version;
 	__le32 abi_version;
@@ -6740,6 +7190,95 @@ struct wmi_pdev_bss_chan_info_event {
 	__le64 cycle_rx_bss;
 	__le32 reserved;
 } __packed;
+
+/* CT firmware only, and only builds after June 26, 2015 */
+struct wmi_pdev_set_special_cmd {
+#define SET_SPECIAL_ID_ACK_CTS 0 /* set ack-cts-timeout register */
+#define SET_SPECIAL_ID_SLOT    1 /* set slot-duration register */
+#define SET_SPECIAL_ID_SIFS    2 /* set sifs-duration register */
+#define SET_SPECIAL_ID_THRESH62_EXT 3 /* set PHY_BB_EXT_CHAN_PWR_THR_1_THRESH62_EXT register field...
+				       * increasing this to 42 helps at least
+				       * one customer pass regulatory testing, for instance.  This is
+				       * same register/field as: PHY_BB_EXT_CHAN_PWR_THR_1_THR_CCA_EXT40
+				       * this is an 8-bit value.
+				       */
+#define SET_SPECIAL_ID_NOISE_FLR_THRESH 4 /* Set some CCA related values in the eeprom struct.  Over-rides existing values.
+					   * BE CAREFUL!  This could put your system out of spec.  It can also put it in
+					   * spec when the eeprom values are dodgy.
+                                           * See debug.c, ath10k_read_ct_special for details.
+                                           */
+#define SET_SPECIAL_ID_IBSS_AMSDU_OK    5 /* As far as I can tell, AR988X hardware is incapable of properly doing
+					   * IBSS  AMSDU frames.  It zeros out the BSSID, which causes the receiving
+					   * stack (Linux, at least) to drop the frame because of bssid-mismatch.
+					   * But, maybe someone has a received that can handle this one way or another
+					   * and wants the additional speed given by AMSDU.  So, use this setting to
+					   * allow AMSDU with IBSS:  val of 1 enables, val of 0 disables.
+					   */
+#define SET_SPECIAL_ID_MAX_TXPOWER      6 /* Set the maximum allowed tx-power.  This over-rules any other
+                                           * power settings.
+                                           */
+#define SET_SPECIAL_ID_RC_MAX_PER_THR   7 /* Set the 'g_rc_rate_max_per_thr' value.  Default is 50.  Higher may make
+                                           * the rate-ctrl logic work better in crouded RF environments.  Tune with
+                                           * care.  I'm not sure than anything above 100 is meaningful.
+                                           */
+#define SET_SPECIAL_ID_STA_TXBW_MASK    8 /* Set the bandwidths that station vdevs can transmit on:
+					   * 0:  all, 0x1: 20Mhz, 0x2 40Mhz, 0x4 80Mhz
+                                           */
+#define SET_SPECIAL_ID_PDEV_XRETRY_TH   9 /* Set the threshold for resetting phy due to failed retries, U16 */
+#define SET_SPECIAL_ID_RIFS_ENABLE    0xA /* Enable(1)/disable(0) RIFS.  Disabled by default. */
+#define SET_SPECIAL_ID_WMI_WD         0xB /* Set the watchdog trigger count, 0 means disable */
+#define SET_SPECIAL_ID_PSHACK         0xC /* flag 0x1:  ignore PS sleep message from STA
+                                           * flag 0x2:  mark mcast as 'data-is-buffered' regardless.
+                                           */
+#define SET_SPECIAL_ID_CSI            0xD /* 0 == disable, else enable reporting CSI data.  10.4 FW only at this time. */
+#define SET_SPECIAL_ID_BW_DISABLE_MASK 0xE /* 0x1 == disable 20Mhz, 0x2 == 40Mhz, 0x4 == 80Mhz, 0x8 == 160Mhz.  0x0 == default */
+#define SET_SPECIAL_ID_TXBF_CV_MSG     0xF /* 0x1 == enable, 0x0 == disable (default). */
+#define SET_SPECIAL_ID_RX_ALL_MGT     0x10 /* Pass all possible mgt frames up to the host
+                                            * 0x1 == enable, 0x0 == disable (default)
+                                            */
+#define SET_SPECIAL_ID_TX_HANG_COLD_RESET     0x11 /* Allow cold-reset in tx-hang recover code. */
+#define SET_SPECIAL_ID_DISABLE_IBSS_CCA       0x12 /* Disable special HWSCH CCA settings for IBSS. */
+#define SET_SPECIAL_ID_PEER_CT_ANTMASK        0x13 /* Set the 'ct' peer antenna mask. Value encodes the peer-id
+						    * (see 'peers' debugfs for peer id listing)
+						    * val = peer_id << 16 | ant-mask-value
+						    */
+#define SET_SPECIAL_ID_EEPROM_CFG_ADDR_A      0x14 /* Append an address to the configAddr in the eeprom.
+						    * The mode should normally be OR'd in to the address.
+						    */
+#define SET_SPECIAL_ID_EEPROM_CFG_ADDR_V      0x15 /* Append an value to the configAddr in the eeprom.  Multiple values may
+						    * be appended if the mode supports it.
+						    */
+#define SET_SPECIAL_ID_PEER_STATS_PN          0x16 /* Report PN in peer-stats object */
+
+/* Requires specially compiled firmware (-T option) to have any useful effect. */
+#define SET_SPECIAL_ID_RC_DBG         0x98 /* 0x1 == enable, 0x0 == disable (default). */
+
+/* Requires specially compiled firmware (-T option) to have any useful effect. */
+#define SET_SPECIAL_ID_TX_DBG         0x99 /* 0x1 == enable, 0x2 == pkt-dbg, 0x0 == disable (default). */
+
+#define CT_CCA_TYPE_MIN0 0
+#define CT_CCA_TYPE_MIN1 1
+#define CT_CCA_TYPE_MIN2 2
+#define CT_CCA_TYPE_NOISE_FLOOR 3
+#define CT_CCA_TYPE_EN_MINCCAPWR 4
+#define CT_CCA_TYPE_MAX 4 /* change as more types are added */
+
+    __le32 id;
+    __le32 val;
+    __le32 extra1;
+    __le32 extra2;
+};
+int ath10k_wmi_pdev_set_special(struct ath10k *ar, u32 id, u32 val);
+
+/* Back door pdev hack API for 10.4 firmware.
+ * Similar to CT firmware's set-special API it seems.
+ */
+struct wmi_fwtest_set_param_cmd {
+    /** parameter id   */
+    __le32 param_id;
+    /** parameter value */
+    __le32 param_value;
+};
 
 /* WOW structures */
 enum wmi_wow_wakeup_event {
@@ -7085,8 +7624,10 @@ void ath10k_wmi_put_start_scan_common(struct wmi_start_scan_common *cmn,
 				      const struct wmi_start_scan_arg *arg);
 void ath10k_wmi_set_wmm_param(struct wmi_wmm_params *params,
 			      const struct wmi_wmm_params_arg *arg);
-void ath10k_wmi_put_wmi_channel(struct wmi_channel *ch,
-				const struct wmi_channel_arg *arg);
+void ath10k_wmi_put_wmi_channel(struct ath10k *ar,
+				struct wmi_channel *ch,
+				const struct wmi_channel_arg *arg,
+				u32 vdev_id);
 int ath10k_wmi_start_scan_verify(const struct wmi_start_scan_arg *arg);
 
 int ath10k_wmi_event_scan(struct ath10k *ar, struct sk_buff *skb);
@@ -7095,6 +7636,7 @@ int ath10k_wmi_event_mgmt_tx_compl(struct ath10k *ar, struct sk_buff *skb);
 void ath10k_wmi_event_chan_info(struct ath10k *ar, struct sk_buff *skb);
 void ath10k_wmi_event_echo(struct ath10k *ar, struct sk_buff *skb);
 int ath10k_wmi_event_debug_mesg(struct ath10k *ar, struct sk_buff *skb);
+int ath10k_wmi_event_csi_mesg(struct ath10k *ar, struct sk_buff *skb);
 void ath10k_wmi_event_update_stats(struct ath10k *ar, struct sk_buff *skb);
 void ath10k_wmi_event_vdev_start_resp(struct ath10k *ar, struct sk_buff *skb);
 void ath10k_wmi_event_vdev_stopped(struct ath10k *ar, struct sk_buff *skb);
@@ -7153,5 +7695,18 @@ int ath10k_wmi_barrier(struct ath10k *ar);
 void ath10k_wmi_tpc_config_get_rate_code(u8 *rate_code, u16 *pream_table,
 					 u32 num_tx_chain);
 void ath10k_wmi_event_tpc_final_table(struct ath10k *ar, struct sk_buff *skb);
+void ath10k_wmi_stop_scan_work(struct work_struct *work);
+int ath10k_wmi_request_ratepwr_tbl(struct ath10k *ar);
+int ath10k_wmi_request_powerctl_tbl(struct ath10k *ar);
+int ath10k_wmi_set_power_ctrl_tbl(struct ath10k *ar, int len, u8 *data);
+int ath10k_wmi_check_apply_board_power_ctl_table(struct ath10k *ar);
+
+#ifdef CONFIG_ATH10K_DEBUGFS
+/* TODO:  Should really enable this all the time, not just when DEBUGFS is enabled. --Ben */
+/* CT Firmware only */
+int ath10k_wmi_request_nop(struct ath10k *ar);
+#else
+#warning Please enable ATH10K-DEBUGFS kernel option for optimal support for CT firmware.
+#endif
 
 #endif /* _WMI_H_ */

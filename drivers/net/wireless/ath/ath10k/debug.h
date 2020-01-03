@@ -22,6 +22,10 @@
 #include <linux/types.h>
 #include "trace.h"
 
+/**
+ * ATH10K_DBG_INFO_AS_DBG: use dev_dbg instead of dev_info
+ *       for ath10k_info messages
+ */
 enum ath10k_debug_mask {
 	ATH10K_DBG_PCI		= 0x00000001,
 	ATH10K_DBG_WMI		= 0x00000002,
@@ -44,6 +48,11 @@ enum ath10k_debug_mask {
 	ATH10K_DBG_USB		= 0x00040000,
 	ATH10K_DBG_USB_BULK	= 0x00080000,
 	ATH10K_DBG_SNOC		= 0x00100000,
+	ATH10K_DBG_BEACON       = 0x08000000, /* Print out beacon debug info */
+	ATH10K_DBG_NO_DBGLOG    = 0x10000000, /* Don't print DBGLOG firmware hex messages in kernel logs. */
+	ATH10K_DBG_MAC2	        = 0x20000000, /* more verbose MAC debugging */
+	ATH10K_DBG_INFO_AS_DBG	= 0x40000000,
+	ATH10K_DBG_FW		= 0x80000000,
 	ATH10K_DBG_ANY		= 0xffffffff,
 };
 
@@ -81,6 +90,12 @@ struct ath10k_pktlog_hdr {
 /* FIXME: How to calculate the buffer size sanely? */
 #define ATH10K_FW_STATS_BUF_SIZE (1024 * 1024)
 
+struct ath10k_dbglog_entry_storage_user {
+	__le32 head_idx; /* Where to write next chunk of data */
+	__le32 tail_idx; /* Index of first msg */
+	__le32 data[ATH10K_DBGLOG_DATA_LEN];
+} __packed;
+
 extern unsigned int ath10k_debug_mask;
 
 __printf(2, 3) void ath10k_info(struct ath10k *ar, const char *fmt, ...);
@@ -91,6 +106,7 @@ void ath10k_debug_print_hwfw_info(struct ath10k *ar);
 void ath10k_debug_print_board_info(struct ath10k *ar);
 void ath10k_debug_print_boot_info(struct ath10k *ar);
 void ath10k_print_driver_info(struct ath10k *ar);
+void ath10k_set_debug_mask(unsigned int v);
 
 #ifdef CONFIG_ATH10K_DEBUGFS
 int ath10k_debug_start(struct ath10k *ar);
@@ -117,6 +133,9 @@ int ath10k_debug_get_et_sset_count(struct ieee80211_hw *hw,
 void ath10k_debug_get_et_stats(struct ieee80211_hw *hw,
 			       struct ieee80211_vif *vif,
 			       struct ethtool_stats *stats, u64 *data);
+void ath10k_debug_get_et_stats2(struct ieee80211_hw *hw,
+				struct ieee80211_vif *vif,
+				struct ethtool_stats *stats, u64 *data, u32 level);
 
 static inline u64 ath10k_debug_get_fw_dbglog_mask(struct ath10k *ar)
 {
@@ -128,7 +147,14 @@ static inline u32 ath10k_debug_get_fw_dbglog_level(struct ath10k *ar)
 	return ar->debug.fw_dbglog_level;
 }
 
+void ath10k_dbg_save_fw_dbg_buffer(struct ath10k *ar, __le32 *buffer, int len);
+
 #else
+
+static inline void ath10k_dbg_save_fw_dbg_buffer(struct ath10k *ar,
+						 __le32 *buffer, int len)
+{
+}
 
 static inline int ath10k_debug_start(struct ath10k *ar)
 {
@@ -264,4 +290,10 @@ static inline void ath10k_dbg_dump(struct ath10k *ar,
 {
 }
 #endif /* CONFIG_ATH10K_DEBUG */
+
+int ath10k_debug_fw_stats_request(struct ath10k *ar);
+int ath10k_refresh_peer_stats(struct ath10k *ar);
+void ath10k_dbg_print_fw_dbg_buffer(struct ath10k *ar, __le32 *buffer,
+				    int len, const char* lvl);
+
 #endif /* _DEBUG_H_ */

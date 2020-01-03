@@ -289,17 +289,25 @@ void ath10k_htt_rx_free(struct ath10k_htt *htt)
 	ath10k_htt_rx_ring_free(htt);
 	spin_unlock_bh(&htt->rx_ring.lock);
 
-	dma_free_coherent(htt->ar->dev,
-			  ath10k_htt_get_rx_ring_size(htt),
-			  ath10k_htt_get_vaddr_ring(htt),
-			  htt->rx_ring.base_paddr);
+	if (htt->rx_ring.base_paddr) {
+		dma_free_coherent(htt->ar->dev,
+				  ath10k_htt_get_rx_ring_size(htt),
+				  ath10k_htt_get_vaddr_ring(htt),
+				  htt->rx_ring.base_paddr);
+		htt->rx_ring.base_paddr = 0;
+	}
 
-	dma_free_coherent(htt->ar->dev,
-			  sizeof(*htt->rx_ring.alloc_idx.vaddr),
-			  htt->rx_ring.alloc_idx.vaddr,
-			  htt->rx_ring.alloc_idx.paddr);
+	if (htt->rx_ring.alloc_idx.paddr) {
+		dma_free_coherent(htt->ar->dev,
+				  sizeof(*htt->rx_ring.alloc_idx.vaddr),
+				  htt->rx_ring.alloc_idx.vaddr,
+				  htt->rx_ring.alloc_idx.paddr);
+		htt->rx_ring.alloc_idx.paddr = 0;
+	}
 
 	kfree(htt->rx_ring.netbufs_ring);
+	htt->rx_ring.netbufs_ring = NULL;
+	htt->rx_ring.size = 0;
 }
 
 static inline struct sk_buff *ath10k_htt_rx_netbuf_pop(struct ath10k_htt *htt)
@@ -319,6 +327,12 @@ static inline struct sk_buff *ath10k_htt_rx_netbuf_pop(struct ath10k_htt *htt)
 	msdu = htt->rx_ring.netbufs_ring[idx];
 	htt->rx_ring.netbufs_ring[idx] = NULL;
 	ath10k_htt_reset_paddrs_ring(htt, idx);
+
+	if (!msdu->data) {
+		ath10k_err(ar, "htt-rx-netbuf-pop, msdu: %p has null data.  idx: %i  ring-size: %i  fill-count: %i",
+			   msdu, idx, htt->rx_ring.size_mask, htt->rx_ring.fill_cnt);
+		BUG_ON(1);
+	}
 
 	idx++;
 	idx &= htt->rx_ring.size_mask;
@@ -892,8 +906,18 @@ ath10k_htt_rx_h_peer_channel(struct ath10k *ar, struct htt_rx_desc *rxd)
 	if (WARN_ON_ONCE(!arvif))
 		return NULL;
 
-	if (ath10k_mac_vif_chan(arvif->vif, &def))
+	if (ath10k_mac_vif_chan(arvif->vif, &def)) {
+		/* This used to WARN_ON_ONCE, but that bothers users, and I am not sure this is really
+		 * a bug. --Ben
+		 */
+		static bool do_once = 1;
+		if (do_once) {
+			ath10k_warn(ar, "mac-vif-chan had error in htt_rx_h_vdev_channel, peer-id: %d  vdev-id: %d peer-addr: %pM.",
+				    peer_id, peer->vdev_id, peer->addr);
+			do_once = 0;
+		}
 		return NULL;
+	}
 
 	return def.chan;
 }
@@ -987,6 +1011,8 @@ static void ath10k_htt_rx_h_signal(struct ath10k *ar,
 	/* FIXME: Get real NF */
 	status->signal = ATH10K_DEFAULT_NOISE_FLOOR +
 			 rxd->ppdu_start.rssi_comb;
+	/* ath10k_warn(ar, "rx-h-sig, signal: %d  chains: 0x%x  chain[0]: %d  chain[1]: %d  chan[2]: %d\n",
+                       status->signal, status->chains, status->chain_signal[0], status->chain_signal[1], status->chain_signal[2]); */
 	status->flag &= ~RX_FLAG_NO_SIGNAL_VAL;
 }
 
@@ -1031,6 +1057,7 @@ static void ath10k_htt_rx_h_ppdu(struct ath10k *ar,
 		status->rate_idx = 0;
 		status->nss = 0;
 		status->encoding = RX_ENC_LEGACY;
+		status->enc_flags = 0;
 		status->bw = RATE_INFO_BW_20;
 
 		status->flag &= ~RX_FLAG_MACTIME_END;
@@ -1181,6 +1208,12 @@ static void ath10k_htt_rx_h_undecap_raw(struct ath10k *ar,
 
 	/* This probably shouldn't happen but warn just in case */
 	if (unlikely(WARN_ON_ONCE(!(is_first && is_last))))
+		return;
+
+	/* We see zero length msdus, not sure why.  At least don't
+	 * try to trim it further.
+	 */
+	if (unlikely(msdu->len < 4))
 		return;
 
 	skb_trim(msdu, msdu->len - FCS_LEN);
@@ -1455,6 +1488,12 @@ static void ath10k_htt_rx_h_undecap(struct ath10k *ar,
 	decap = MS(__le32_to_cpu(rxd->msdu_start.common.info1),
 		   RX_MSDU_START_INFO1_DECAP_FORMAT);
 
+	/*
+	  ath10k_dbg(ar, ATH10K_DBG_HTT,
+		   "rx-undecap: msdu-len: %d  decap: %d  ip-summed: %d decrypted: %d enctype: %d\n",
+		   msdu->len, decap, msdu->ip_summed, is_decrypted, enctype);
+	*/
+
 	switch (decap) {
 	case RX_MSDU_DECAP_RAW:
 		ath10k_htt_rx_h_undecap_raw(ar, msdu, status, enctype,
@@ -1629,7 +1668,16 @@ static void ath10k_htt_rx_h_mpdu(struct ath10k *ar,
 			status->flag |= RX_FLAG_IV_STRIPPED;
 	}
 
+	/*
+	ath10k_dbg(ar, ATH10K_DBG_HTT,
+		   "rx-mpdu: first-len: %d  fcs-err: %i  tkip-err: %i decrypted: %i crypto-err: %i  peer-idx-inval: %i  enctype: %i\n",
+		   first->len, has_fcs_err, has_tkip_err, is_decrypted, has_crypto_err,
+		   has_peer_idx_invalid, enctype);
+	*/
 	skb_queue_walk(amsdu, msdu) {
+#ifdef CONFIG_ATH10K_DEBUGFS
+		ar->debug.rx_bytes += msdu->len;
+#endif
 		ath10k_htt_rx_h_csum_offload(msdu);
 		ath10k_htt_rx_h_undecap(ar, msdu, status, first_hdr, enctype,
 					is_decrypted);
@@ -1678,7 +1726,7 @@ static void ath10k_htt_rx_h_enqueue(struct ath10k *ar,
 	}
 }
 
-static int ath10k_unchain_msdu(struct sk_buff_head *amsdu,
+static int ath10k_unchain_msdu(struct ath10k *ar, struct sk_buff_head *amsdu,
 			       unsigned long int *unchain_cnt)
 {
 	struct sk_buff *skb, *first;
@@ -1702,10 +1750,12 @@ static int ath10k_unchain_msdu(struct sk_buff_head *amsdu,
 	space = total_len - skb_tailroom(first);
 	if ((space > 0) &&
 	    (pskb_expand_head(first, 0, space, GFP_ATOMIC) < 0)) {
-		/* TODO:  bump some rx-oom error stat */
 		/* put it back together so we can free the
 		 * whole list at once.
 		 */
+#ifdef CONFIG_ATH10K_DEBUGFS
+		ar->debug.rx_drop_unchain_oom++;
+#endif
 		__skb_queue_head(amsdu, first);
 		return -1;
 	}
@@ -1748,11 +1798,14 @@ static void ath10k_htt_rx_h_unchain(struct ath10k *ar,
 	if (decap != RX_MSDU_DECAP_RAW ||
 	    skb_queue_len(amsdu) != 1 + rxd->frag_info.ring2_more_count) {
 		*drop_cnt += skb_queue_len(amsdu);
+#ifdef CONFIG_ATH10K_DEBUGFS
+		ar->debug.rx_drop_decap_non_raw_chained++;
+#endif
 		__skb_queue_purge(amsdu);
 		return;
 	}
 
-	ath10k_unchain_msdu(amsdu, unchain_cnt);
+	ath10k_unchain_msdu(ar, amsdu, unchain_cnt);
 }
 
 static bool ath10k_htt_rx_amsdu_allowed(struct ath10k *ar,
@@ -1765,11 +1818,17 @@ static bool ath10k_htt_rx_amsdu_allowed(struct ath10k *ar,
 
 	if (!rx_status->freq) {
 		ath10k_dbg(ar, ATH10K_DBG_HTT, "no channel configured; ignoring frame(s)!\n");
+#ifdef CONFIG_ATH10K_DEBUGFS
+		ar->debug.rx_drop_no_freq++;
+#endif
 		return false;
 	}
 
 	if (test_bit(ATH10K_CAC_RUNNING, &ar->dev_flags)) {
 		ath10k_dbg(ar, ATH10K_DBG_HTT, "htt rx cac running\n");
+#ifdef CONFIG_ATH10K_DEBUGFS
+		ar->debug.rx_drop_cac_running++;
+#endif
 		return false;
 	}
 
@@ -1882,7 +1941,7 @@ static void ath10k_htt_rx_tx_compl_ind(struct ath10k *ar,
 {
 	struct ath10k_htt *htt = &ar->htt;
 	struct htt_resp *resp = (struct htt_resp *)skb->data;
-	struct htt_tx_done tx_done = {};
+	struct htt_tx_done tx_done = {0};
 	int status = MS(resp->data_tx_completion.flags, HTT_DATA_TX_STATUS);
 	__le16 msdu_id;
 	int i;
@@ -1905,25 +1964,158 @@ static void ath10k_htt_rx_tx_compl_ind(struct ath10k *ar,
 		break;
 	}
 
-	ath10k_dbg(ar, ATH10K_DBG_HTT, "htt tx completion num_msdus %d\n",
-		   resp->data_tx_completion.num_msdus);
+	ath10k_dbg(ar, ATH10K_DBG_HTT,
+		   "htt tx completion num_msdus %d status: %d  discard: %d  no-ack: %d wmi-op-ver: %d\n",
+		   resp->data_tx_completion.num_msdus, status,
+		   tx_done.status == HTT_TX_COMPL_STATE_DISCARD,
+		   tx_done.status == HTT_TX_COMPL_STATE_NOACK,
+		   ar->running_fw->fw_file.wmi_op_version);
 
-	for (i = 0; i < resp->data_tx_completion.num_msdus; i++) {
-		msdu_id = resp->data_tx_completion.msdus[i];
-		tx_done.msdu_id = __le16_to_cpu(msdu_id);
+	if (test_bit(ATH10K_FW_FEATURE_TXRATE_CT,
+		     ar->running_fw->fw_file.fw_features) &&
+	    ar->running_fw->fw_file.wmi_op_version != ATH10K_FW_WMI_OP_VERSION_10_4) {
+		/* CT firmware reports tx-rate-kbps as well as the msdu id */
+		for (i = 0; i < resp->data_tx_completion_ct.num_msdus; i++) {
+			if (likely(test_bit(ATH10K_FW_FEATURE_TXRATE2_CT,
+					    ar->running_fw->fw_file.fw_features))) {
+				msdu_id = resp->data_tx_completion_ct2.msdus[i].id;
+				tx_done.msdu_id = __le16_to_cpu(msdu_id);
+				tx_done.tx_rate_code = resp->data_tx_completion_ct2.msdus[i].tx_rate_code;
+				tx_done.tx_rate_flags = resp->data_tx_completion_ct2.msdus[i].tx_rate_flags;
+				tx_done.mpdus_tried = resp->data_tx_completion_ct2.msdus[i].mpdus_tried;
+				tx_done.mpdus_failed = resp->data_tx_completion_ct2.msdus[i].mpdus_failed;
+			}
+			else {
+				msdu_id = resp->data_tx_completion_ct.msdus[i].id;
+				tx_done.msdu_id = __le16_to_cpu(msdu_id);
+				tx_done.tx_rate_code = resp->data_tx_completion_ct.msdus[i].tx_rate_code;
+				tx_done.tx_rate_flags = resp->data_tx_completion_ct.msdus[i].tx_rate_flags;
+			}
 
-		/* kfifo_put: In practice firmware shouldn't fire off per-CE
-		 * interrupt and main interrupt (MSI/-X range case) for the same
-		 * HTC service so it should be safe to use kfifo_put w/o lock.
-		 *
-		 * From kfifo_put() documentation:
-		 *  Note that with only one concurrent reader and one concurrent
-		 *  writer, you don't need extra locking to use these macro.
+			/* NOTE:  It seems only the first ampdu returns useful info here, at least with 'v1'
+			 * of the ath10k-ct wave-1 tx-rate logic.
+			 */
+
+			/* ath10k_warn(ar,
+				    "htt tx completion, msdu_id: %d  tx-rate-code: 0x%x tx-rate-flags: 0x%x  tried: %d  failed: %d\n",
+				    tx_done.msdu_id,
+				    tx_done.tx_rate_code,
+				    tx_done.tx_rate_flags,
+				    tx_done.mpdus_tried,
+				    tx_done.mpdus_failed);*/
+
+			/* kfifo_put: In practice firmware shouldn't fire off per-CE
+			 * interrupt and main interrupt (MSI/-X range case) for the same
+			 * HTC service so it should be safe to use kfifo_put w/o lock.
+			 *
+			 * From kfifo_put() documentation:
+			 *  Note that with only one concurrent reader and one concurrent
+			 *  writer, you don't need extra locking to use these macro.
+			 */
+			if (!kfifo_put(&htt->txdone_fifo, tx_done)) {
+				ath10k_warn(ar, "txdone fifo overrun, msdu_id %d status %d\n",
+					    tx_done.msdu_id, tx_done.status);
+				ath10k_txrx_tx_unref(htt, &tx_done);
+			}
+
+		}
+	} else if (resp->data_tx_completion.flag_ack_rssi_filled) {
+		/* Round up, firmware will align to 32-bit boundaries */
+		int storage_idx = (resp->data_tx_completion_ct.num_msdus + 1) & ~1;
+		__le16 ack_rssi;
+		__le16 rate_info;
+		__le16 retries_info;
+		/* 10.4 firmware may report the ack rssi.  If so, it is
+		 * a series of uint16 appended on the end of the report.
+		 * And, 10.4 CT firmware may also report tx-rate, which
+		 * will again be a series of uint16 appended on the end.
 		 */
-		if (!kfifo_put(&htt->txdone_fifo, tx_done)) {
-			ath10k_warn(ar, "txdone fifo overrun, msdu_id %d status %d\n",
-				    tx_done.msdu_id, tx_done.status);
+		if (WARN_ON_ONCE(skb->len < ((storage_idx * 2) + sizeof(struct htt_data_tx_completion)))) {
+			ath10k_err(ar, "Invalid length for ack-rssi report, skb->len: %d  storage_idx: %d msdu: %d\n",
+				   skb->len, storage_idx, resp->data_tx_completion_ct.num_msdus);
+			goto do_generic;
+		}
+
+		if (resp->data_tx_completion.flag_tx_rate_filled &&
+		    WARN_ON_ONCE(skb->len < ((storage_idx * 3) + sizeof(struct htt_data_tx_completion)))) {
+			ath10k_err(ar, "Invalid length for tx-rates report, skb->len: %d  storage_idx: %d msdu: %d\n",
+				   skb->len, storage_idx, resp->data_tx_completion_ct.num_msdus);
+			goto do_generic;
+		}
+
+		if (resp->data_tx_completion.flag_tx_retries_filled &&
+		    WARN_ON_ONCE(skb->len < ((storage_idx * 4) + sizeof(struct htt_data_tx_completion)))) {
+			ath10k_err(ar, "Invalid length for tx-retries report, skb->len: %d  storage_idx: %d msdu: %d\n",
+				   skb->len, storage_idx, resp->data_tx_completion_ct.num_msdus);
+			goto do_generic;
+		}
+
+		tx_done.tx_rate_code = 0;
+		tx_done.tx_rate_flags = 0;
+		tx_done.mpdus_tried = 0;
+		tx_done.mpdus_failed = 0;
+		for (i = 0; i < resp->data_tx_completion_ct.num_msdus; i++) {
+			msdu_id = resp->data_tx_completion.msdus[i];
+			tx_done.msdu_id = __le16_to_cpu(msdu_id);
+			ack_rssi = resp->data_tx_completion.msdus[storage_idx + i];
+			tx_done.ack_rssi = __le16_to_cpu(ack_rssi);
+			if (resp->data_tx_completion.flag_tx_rate_filled) {
+				rate_info = resp->data_tx_completion.msdus[storage_idx * 2 + i];
+				rate_info = __le16_to_cpu(rate_info);
+				tx_done.tx_rate_code = rate_info >> 8;
+				tx_done.tx_rate_flags = rate_info & 0xFF;
+				if (resp->data_tx_completion.flag_tx_retries_filled) {
+					/* NOTE:  It seems that if 'probe' frames in the firmware
+					 * fail, then they will be retried at a lower rate, and because
+					 * the tx rate is different, it is not counted as 'mpdus_failed'
+					 * when finally reporting the tx status here.  So, this will
+					 * undercount, at least when using rate-ctrl.  I think that using
+					 * a single fixed rate might not see this issue, but that needs
+					 * testing. --Ben
+					 */
+					retries_info = resp->data_tx_completion.msdus[storage_idx * 3 + i];
+					retries_info = __le16_to_cpu(retries_info);
+					tx_done.mpdus_tried = retries_info & 0xFF;
+					tx_done.mpdus_failed = retries_info >> 8;
+				}
+			}
+			/*ath10k_warn(ar,
+				    "htt tx completion-w2, msdu_id: %d  tx-rate-code: 0x%x tx-rate-flags: 0x%x  tried: %d  failed: %d ack-rssi: %d\n",
+				    tx_done.msdu_id,
+				    tx_done.tx_rate_code,
+				    tx_done.tx_rate_flags,
+				    tx_done.mpdus_tried,
+				    tx_done.mpdus_failed,
+				    tx_done.ack_rssi);*/
+
+			/* Firmware reports garbage for ack-rssi if packet was not acked. */
+			if (unlikely(tx_done.status != HTT_TX_COMPL_STATE_ACK))
+				tx_done.ack_rssi = 0;
+
 			ath10k_txrx_tx_unref(htt, &tx_done);
+		}
+	} else {
+do_generic:
+		/* Upstream firmware does not report any tx-rate */
+		tx_done.tx_rate_code = 0;
+		tx_done.tx_rate_flags = 0;
+		for (i = 0; i < resp->data_tx_completion.num_msdus; i++) {
+			msdu_id = resp->data_tx_completion.msdus[i];
+			tx_done.msdu_id = __le16_to_cpu(msdu_id);
+
+			/* kfifo_put: In practice firmware shouldn't fire off per-CE
+			 * interrupt and main interrupt (MSI/-X range case) for the same
+			 * HTC service so it should be safe to use kfifo_put w/o lock.
+			 *
+			 * From kfifo_put() documentation:
+			 *  Note that with only one concurrent reader and one concurrent
+			 *  writer, you don't need extra locking to use these macro.
+			 */
+			if (!kfifo_put(&htt->txdone_fifo, tx_done)) {
+				ath10k_warn(ar, "txdone fifo overrun, msdu_id %d status %d\n",
+					    tx_done.msdu_id, tx_done.status);
+				ath10k_txrx_tx_unref(htt, &tx_done);
+			}
 		}
 	}
 }
@@ -1946,16 +2138,16 @@ static void ath10k_htt_rx_addba(struct ath10k *ar, struct htt_resp *resp)
 	spin_lock_bh(&ar->data_lock);
 	peer = ath10k_peer_find_by_id(ar, peer_id);
 	if (!peer) {
-		ath10k_warn(ar, "received addba event for invalid peer_id: %hu\n",
-			    peer_id);
+		ath10k_warn(ar, "received addba event for invalid peer_id: %hu tid: %d\n",
+			    peer_id, tid);
 		spin_unlock_bh(&ar->data_lock);
 		return;
 	}
 
 	arvif = ath10k_get_arvif(ar, peer->vdev_id);
 	if (!arvif) {
-		ath10k_warn(ar, "received addba event for invalid vdev_id: %u\n",
-			    peer->vdev_id);
+		ath10k_warn(ar, "received addba event for invalid vdev_id: %u peer_id: %hu tid: %d\n",
+			    peer->vdev_id, peer_id, tid);
 		spin_unlock_bh(&ar->data_lock);
 		return;
 	}
@@ -2276,6 +2468,13 @@ static void ath10k_htt_rx_tx_fetch_ind(struct ath10k *ar, struct sk_buff *skb)
 
 	rcu_read_lock();
 
+	/* Wave-2 firmware that I saw uses a u8 to store the num-records in the handler
+	 * code, so if driver sends > 256, driver and firmware will be out of sync.  I am
+	 * fixing this in my firmware, but WARN here so we can know if other firmware would
+	 * ever see this problem.
+	 */
+	WARN_ON_ONCE(num_records > 256);
+
 	for (i = 0; i < num_records; i++) {
 		record = &resp->tx_fetch_ind.records[i];
 		peer_id = MS(le16_to_cpu(record->info),
@@ -2304,8 +2503,13 @@ static void ath10k_htt_rx_tx_fetch_ind(struct ath10k *ar, struct sk_buff *skb)
 		 */
 
 		if (unlikely(!txq)) {
-			ath10k_warn(ar, "failed to lookup txq for peer_id %hu tid %hhu\n",
-				    peer_id, tid);
+			if (net_ratelimit()) {
+				ath10k_warn(ar, "fetch-ind: failed to lookup txq for peer_id %hu tid %hhu\n",
+					    peer_id, tid);
+				spin_lock_bh(&ar->data_lock);
+				ath10k_mac_print_txq_info(ar, peer_id, tid);
+				spin_unlock_bh(&ar->data_lock);
+			}
 			continue;
 		}
 
@@ -2461,8 +2665,9 @@ static void ath10k_htt_rx_tx_mode_switch_ind(struct ath10k *ar,
 		 */
 
 		if (unlikely(!txq)) {
-			ath10k_warn(ar, "failed to lookup txq for peer_id %hu tid %hhu\n",
-				    peer_id, tid);
+			if (net_ratelimit())
+				ath10k_warn(ar, "mode-switch: failed to lookup txq for peer_id %hu tid %hhu\n",
+					    peer_id, tid);
 			continue;
 		}
 
@@ -2520,14 +2725,30 @@ ath10k_update_per_peer_tx_stats(struct ath10k *ar,
 	sgi = ATH10K_HW_GI(peer_stats->flags);
 
 	if (txrate.flags == WMI_RATE_PREAMBLE_VHT && txrate.mcs > 9) {
-		ath10k_warn(ar, "Invalid VHT mcs %hhd peer stats",  txrate.mcs);
+		static bool done_once = 0;
+		if (!done_once) {
+			ath10k_warn(ar, "Invalid VHT mcs %hhd peer stats",  txrate.mcs);
+			done_once = true;
+		}
+		else {
+			ath10k_dbg(ar, ATH10K_DBG_HTT, "Invalid VHT mcs %hhd peer stats",  txrate.mcs);
+		}
 		return;
 	}
 
 	if (txrate.flags == WMI_RATE_PREAMBLE_HT &&
 	    (txrate.mcs > 7 || txrate.nss < 1)) {
-		ath10k_warn(ar, "Invalid HT mcs %hhd nss %hhd peer stats",
-			    txrate.mcs, txrate.nss);
+		static bool done_once = 0;
+		if (!done_once) {
+			ath10k_warn(ar, "Invalid HT mcs %hhd nss %hhd peer stats",
+				    txrate.mcs, txrate.nss);
+			done_once = true;
+		}
+		else {
+			ath10k_dbg(ar, ATH10K_DBG_HTT,
+				   "Invalid HT mcs %hhd nss %hhd peer stats",
+				   txrate.mcs, txrate.nss);
+		}
 		return;
 	}
 
@@ -2538,8 +2759,17 @@ ath10k_update_per_peer_tx_stats(struct ath10k *ar,
 		rate = ATH10K_HW_LEGACY_RATE(peer_stats->ratecode);
 
 		if (!is_valid_legacy_rate(rate)) {
-			ath10k_warn(ar, "Invalid legacy rate %hhd peer stats",
-				    rate);
+			static bool done_once = 0;
+			if (!done_once) {
+				ath10k_warn(ar, "Invalid legacy rate %hhd peer stats",
+					    rate);
+				done_once = true;
+			}
+			else {
+				ath10k_dbg(ar, ATH10K_DBG_HTT,
+					   "Invalid legacy rate %hhd peer stats",
+					   rate);
+			}
 			return;
 		}
 
@@ -2590,8 +2820,17 @@ static void ath10k_htt_fetch_peer_stats(struct ath10k *ar,
 	spin_lock_bh(&ar->data_lock);
 	peer = ath10k_peer_find_by_id(ar, peer_id);
 	if (!peer || !peer->sta) {
-		ath10k_warn(ar, "Invalid peer id %d peer stats buffer\n",
-			    peer_id);
+		static bool done_once = false;
+		if (!done_once) {
+			ath10k_warn(ar, "Invalid peer id %d or peer stats buffer, peer: %p  sta: %p\n",
+				    peer_id, peer, peer ? peer->sta : NULL);
+			done_once = true;
+		}
+		else {
+			ath10k_dbg(ar, ATH10K_DBG_HTT,
+				   "Invalid peer id %d or peer stats buffer, peer: %p  sta: %p\n",
+				   peer_id, peer, peer ? peer->sta : NULL);
+		}
 		goto out;
 	}
 
@@ -2698,6 +2937,16 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 	case HTT_T2H_MSG_TYPE_VERSION_CONF: {
 		htt->target_version_major = resp->ver_resp.major;
 		htt->target_version_minor = resp->ver_resp.minor;
+
+		/* CT firmware with HTT-MGT?  No official firmware has this
+		 * htt version combination as far as I am aware. --Ben
+		 */
+		if ((htt->target_version_major == 2 &&
+		     htt->target_version_minor == 2))
+			ar->ct_all_pkts_htt = true;
+		else
+			ar->ct_all_pkts_htt = false;
+
 		complete(&htt->target_version_received);
 		break;
 	}
@@ -2721,11 +2970,13 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 		break;
 	}
 	case HTT_T2H_MSG_TYPE_MGMT_TX_COMPLETION: {
-		struct htt_tx_done tx_done = {};
+		struct htt_tx_done tx_done = {0};
 		int status = __le32_to_cpu(resp->mgmt_tx_completion.status);
 		int info = __le32_to_cpu(resp->mgmt_tx_completion.info);
 
 		tx_done.msdu_id = __le32_to_cpu(resp->mgmt_tx_completion.desc_id);
+		tx_done.tx_rate_code = 0;
+		tx_done.tx_rate_flags = 0;
 
 		switch (status) {
 		case HTT_MGMT_TX_STATUS_OK:
@@ -2740,6 +2991,9 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 			}
 			break;
 		case HTT_MGMT_TX_STATUS_RETRY:
+			tx_done.status = HTT_TX_COMPL_STATE_NOACK;
+			break;
+		case HTT_MGMT_TX_STATUS_TXFILT:
 			tx_done.status = HTT_TX_COMPL_STATE_NOACK;
 			break;
 		case HTT_MGMT_TX_STATUS_DROP:
@@ -2764,9 +3018,23 @@ bool ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 
 		ath10k_dbg(ar, ATH10K_DBG_HTT,
 			   "sec ind peer_id %d unicast %d type %d\n",
-			  __le16_to_cpu(ev->peer_id),
-			  !!(ev->flags & HTT_SECURITY_IS_UNICAST),
-			  MS(ev->flags, HTT_SECURITY_TYPE));
+			   __le16_to_cpu(ev->peer_id),
+			   !!(ev->flags & HTT_SECURITY_IS_UNICAST),
+			   MS(ev->flags, HTT_SECURITY_TYPE));
+
+		/* CT firmware adds way to determine failure of key set, without
+		 * just timing things out.  Indication of failure is determined
+		 * by the 6th bit of the security-type being set.
+		 */
+		if (ev->flags & HTT_SECURITY_IS_FAILURE) {
+			ath10k_warn(ar, "Firmware failed to set security key, peer_id: %d unicast %d type %d\n",
+				    __le16_to_cpu(ev->peer_id),
+				    !!(ev->flags & HTT_SECURITY_IS_UNICAST),
+				    MS(ev->flags, HTT_SECURITY_TYPE));
+			ar->install_key_rv = -EINVAL;
+		} else {
+			ar->install_key_rv = 0;
+		}
 		complete(&ar->install_key_done);
 		break;
 	}

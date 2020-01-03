@@ -161,6 +161,8 @@ enum qca9377_chip_id_rev {
 
 #define REG_DUMP_COUNT_QCA988X 60
 
+#define ATH10K_FW_STACK_SIZE 4096
+
 struct ath10k_fw_ie {
 	__le32 id;
 	__le32 len;
@@ -186,6 +188,8 @@ enum ath10k_fw_ie_type {
 
 	/* Code swap image for firmware binary */
 	ATH10K_FW_IE_FW_CODE_SWAP_IMAGE = 7,
+
+	ATH10K_FW_IE_BSS_INFO_CT = 30,
 };
 
 enum ath10k_fw_wmi_op_version {
@@ -662,6 +666,26 @@ ath10k_rx_desc_get_l3_pad_bytes(struct ath10k_hw_params *hw,
 						 (TARGET_10X_NUM_VDEVS))
 #define TARGET_10X_TX_STATS_NUM_PEERS		((TARGET_10X_TX_STATS_NUM_STATIONS) + \
 						 (TARGET_10X_NUM_VDEVS))
+
+/* Over-rides for Candela Technologies firmware */
+#define DEF_TARGET_10X_NUM_VDEVS_CT		16 /* Can support up to 64 with proper config of other settings.
+						    * override w/module parm or fwcfg file */
+/* NOTE:  AST can really hold 4 keys, and there can be some temporarily in use as well.  So this
+ * needs to be pretty large.  256 works in my testing with 64 station vdevs (360 works better). --Ben
+ */
+#define TARGET_10X_AST_SKID_LIMIT_CT		360 /*((ath10k_modparam_target_num_peers_ct * TARGET_10X_NUM_PEER_AST)*/
+#define TARGET_10X_NUM_PEER_KEYS_CT             (WMI_MAX_KEY_INDEX + 1) /* 4 */
+
+/* Related to HTC buffers */
+/* return any credit immediately */
+#define TARGET_HTC_MAX_PENDING_TXCREDITS_RPTS   1
+/* 8 ctrl buffers for sending info to host */
+#define TARGET_HTC_MAX_CONTROL_BUFFERS          6
+/* Only CT firmware will actually use this value.  Each buffer is close to 2K
+ * of firmware RAM, so not sure if increasing this is worth the RAM cost.
+ */
+#define TARGET_HTC_MAX_TX_CREDITS_CT            4
+
 #define TARGET_10X_NUM_OFFLOAD_PEERS		0
 #define TARGET_10X_NUM_OFFLOAD_REORDER_BUFS	0
 #define TARGET_10X_NUM_PEER_KEYS		2
@@ -909,6 +933,7 @@ ath10k_rx_desc_get_l3_pad_bytes(struct ath10k_hw_params *hw,
 #define PCIE_INTR_ENABLE_ADDRESS		0x0008
 #define PCIE_INTR_CAUSE_ADDRESS			0x000c
 #define PCIE_INTR_CLR_ADDRESS			ar->regs->pcie_intr_clr_address
+#define SCRATCH_2_ADDRESS                       0x002c
 #define SCRATCH_3_ADDRESS			ar->regs->scratch_3_address
 #define CPU_INTR_ADDRESS			0x0010
 #define FW_RAM_CONFIG_ADDRESS			0x0018
@@ -920,6 +945,10 @@ ath10k_rx_desc_get_l3_pad_bytes(struct ath10k_hw_params *hw,
 #define FW_IND_EVENT_PENDING			1
 #define FW_IND_INITIALIZED			2
 #define FW_IND_HOST_READY			0x80000000
+
+/* CT firmware only */
+#define FW_IND_SCRATCH2_WR      (1<<14) /* scratch2 has data written to it */
+#define FW_IND_SCRATCH2_RD      (1<<15) /* scratch2 has been read (by host) */
 
 /* HOST_REG interrupt from firmware */
 #define PCIE_INTR_FIRMWARE_MASK			ar->regs->pcie_intr_fw_mask
@@ -1123,5 +1152,26 @@ ath10k_rx_desc_get_l3_pad_bytes(struct ath10k_hw_params *hw,
 #define RTC_SYNC_STATUS_PLL_CHANGING_LSB	5
 #define RTC_SYNC_STATUS_PLL_CHANGING_MASK	0x00000020
 /* qca6174 PLL offset/mask end */
+
+/* Target debug log related defines and structs */
+
+/* Target is 32-bit CPU, so we just use u32 for
+ * the pointers.  The memory space is relative to the
+ * target, not the host.  Values are converted to host
+ * byte order when reading from firmware.
+ */
+struct ath10k_fw_dbglog_buf {
+	__le32 next; /* pointer to ath10k_fw_dbglog_buf. */
+	__le32 buffer; /* pointer to u8 buffer */
+	__le32 bufsize;
+	__le32 length;
+	__le32 count;
+	__le32 free;
+} __packed;
+
+struct ath10k_fw_dbglog_hdr {
+	__le32 dbuf; /* pointer to ath10k_fw_dbglog_buf */
+	__le32 dropped;
+} __packed;
 
 #endif /* _HW_H_ */

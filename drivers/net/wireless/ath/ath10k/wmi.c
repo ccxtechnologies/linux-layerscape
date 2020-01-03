@@ -18,6 +18,7 @@
 
 #include <linux/skbuff.h>
 #include <linux/ctype.h>
+#include <linux/module.h>
 
 #include "core.h"
 #include "htc.h"
@@ -324,8 +325,8 @@ static struct wmi_cmd_map wmi_10x_cmd_map = {
 	.force_fw_hang_cmdid = WMI_CMD_UNSUPPORTED,
 	.gpio_config_cmdid = WMI_10X_GPIO_CONFIG_CMDID,
 	.gpio_output_cmdid = WMI_10X_GPIO_OUTPUT_CMDID,
-	.pdev_get_temperature_cmdid = WMI_CMD_UNSUPPORTED,
-	.pdev_enable_adaptive_cca_cmdid = WMI_CMD_UNSUPPORTED,
+	.pdev_get_temperature_cmdid = WMI_10X_PDEV_GET_TEMPERATURE_CMDID,
+	.pdev_enable_adaptive_cca_cmdid = WMI_10X_SET_CCA_PARAMS_CMDID, /* CT only */
 	.scan_update_request_cmdid = WMI_CMD_UNSUPPORTED,
 	.vdev_standby_response_cmdid = WMI_CMD_UNSUPPORTED,
 	.vdev_resume_response_cmdid = WMI_CMD_UNSUPPORTED,
@@ -346,9 +347,9 @@ static struct wmi_cmd_map wmi_10x_cmd_map = {
 	.peer_smart_ant_set_train_info_cmdid = WMI_CMD_UNSUPPORTED,
 	.peer_smart_ant_set_node_config_ops_cmdid = WMI_CMD_UNSUPPORTED,
 	.pdev_set_antenna_switch_table_cmdid = WMI_CMD_UNSUPPORTED,
-	.pdev_set_ctl_table_cmdid = WMI_CMD_UNSUPPORTED,
-	.pdev_set_mimogain_table_cmdid = WMI_CMD_UNSUPPORTED,
-	.pdev_ratepwr_table_cmdid = WMI_CMD_UNSUPPORTED,
+	.pdev_set_ctl_table_cmdid = WMI_10X_PDEV_SET_CTL_TABLE_CMDID, /* CT only */
+	.pdev_set_mimogain_table_cmdid = WMI_10X_PDEV_SET_MIMOGAIN_TABLE_CMDID, /* CT only */
+	.pdev_ratepwr_table_cmdid = WMI_10X_PDEV_RATEPWR_TABLE_CMDID, /* CT only */
 	.pdev_ratepwr_chainmsk_table_cmdid = WMI_CMD_UNSUPPORTED,
 	.pdev_fips_cmdid = WMI_CMD_UNSUPPORTED,
 	.tt_set_conf_cmdid = WMI_CMD_UNSUPPORTED,
@@ -367,7 +368,8 @@ static struct wmi_cmd_map wmi_10x_cmd_map = {
 	.vdev_filter_neighbor_rx_packets_cmdid = WMI_CMD_UNSUPPORTED,
 	.mu_cal_start_cmdid = WMI_CMD_UNSUPPORTED,
 	.set_cca_params_cmdid = WMI_CMD_UNSUPPORTED,
-	.pdev_bss_chan_info_request_cmdid = WMI_CMD_UNSUPPORTED,
+	.pdev_bss_chan_info_request_cmdid =
+		WMI_10_2_PDEV_BSS_CHAN_INFO_REQUEST_CMDID,
 	.pdev_get_tpc_table_cmdid = WMI_CMD_UNSUPPORTED,
 	.radar_found_cmdid = WMI_CMD_UNSUPPORTED,
 };
@@ -884,7 +886,7 @@ static struct wmi_vdev_param_map wmi_10x_vdev_param_map = {
 	.tx_encap_type = WMI_VDEV_PARAM_UNSUPPORTED,
 	.ap_detect_out_of_sync_sleeping_sta_time_secs =
 		WMI_10X_VDEV_PARAM_AP_DETECT_OUT_OF_SYNC_SLEEPING_STA_TIME_SECS,
-	.rc_num_retries = WMI_VDEV_PARAM_UNSUPPORTED,
+	.rc_num_retries = WMI_10X_VDEV_PARAM_RC_NUM_RETRIES,
 	.cabq_maxdur = WMI_VDEV_PARAM_UNSUPPORTED,
 	.mfptest_set = WMI_VDEV_PARAM_UNSUPPORTED,
 	.rts_fixed_rate = WMI_VDEV_PARAM_UNSUPPORTED,
@@ -1635,6 +1637,7 @@ static const struct wmi_peer_flags_map wmi_10x_peer_flags_map = {
 	.spatial_mux = WMI_10X_PEER_SPATIAL_MUX,
 	.vht = WMI_10X_PEER_VHT,
 	.bw80 = WMI_10X_PEER_80MHZ,
+	.pmf = WMI_10X_PEER_PMF, /* CT only */
 	.bw160 = WMI_10X_PEER_160MHZ,
 };
 
@@ -1658,8 +1661,38 @@ static const struct wmi_peer_flags_map wmi_10_2_peer_flags_map = {
 	.bw160 = WMI_10_2_PEER_160MHZ,
 };
 
-void ath10k_wmi_put_wmi_channel(struct wmi_channel *ch,
-				const struct wmi_channel_arg *arg)
+static bool ath10k_ok_skip_ch_reservation(struct ath10k *ar, u32 vdev_id)
+{
+	struct ath10k_vif *arvif;
+	bool rv = false;
+
+	if (! test_bit(ATH10K_FW_FEATURE_SKIP_CH_RES_CT,
+		       ar->running_fw->fw_file.fw_features))
+		return rv;
+
+	list_for_each_entry(arvif, &ar->arvifs, list) {
+		if (!arvif->is_up)
+			continue;
+
+		if (arvif->vdev_id == vdev_id) {
+			if (arvif->vdev_type != WMI_VDEV_TYPE_STA)
+				return false;
+			continue;
+		}
+
+		/* If there is another station up, then assume
+		 * requested station must use same channel.
+		 */
+		if (arvif->vdev_type == WMI_VDEV_TYPE_STA)
+			rv = true;
+	}
+	return rv;
+}
+
+void ath10k_wmi_put_wmi_channel(struct ath10k *ar,
+				struct wmi_channel *ch,
+				const struct wmi_channel_arg *arg,
+				u32 vdev_id)
 {
 	u32 flags = 0;
 
@@ -1677,6 +1710,10 @@ void ath10k_wmi_put_wmi_channel(struct wmi_channel *ch,
 		flags |= WMI_CHAN_FLAG_HT40_PLUS;
 	if (arg->chan_radar)
 		flags |= WMI_CHAN_FLAG_DFS;
+
+	if (ath10k_ok_skip_ch_reservation(ar, vdev_id))
+		/* Disable having firmware request on-channel reservation */
+		flags |= WMI_CHAN_FLAG_NO_RESERVE_CH;
 
 	ch->mhz = __cpu_to_le32(arg->freq);
 	ch->band_center_freq1 = __cpu_to_le32(arg->band_center_freq1);
@@ -1780,6 +1817,15 @@ static void ath10k_wmi_tx_beacon_nowait(struct ath10k_vif *arvif)
 	bool deliver_cab;
 	int ret;
 
+	/* I saw a kasan warning here, looks like arvif and/or ar might have been
+	 * NULL, add something to catch this if it happens again.
+	 */
+	if ((((unsigned long)(arvif)) < 8000) || (((unsigned long)(ar)) < 8000)) {
+		pr_err("tx-beacon-nowait:  arvif: %p  ar: %p\n", arvif, ar);
+		BUG_ON(((unsigned long)(arvif)) < 8000);
+		BUG_ON(((unsigned long)(ar)) < 8000);
+	}
+
 	spin_lock_bh(&ar->data_lock);
 
 	bcn = arvif->beacon;
@@ -1799,12 +1845,14 @@ static void ath10k_wmi_tx_beacon_nowait(struct ath10k_vif *arvif)
 
 		dtim_zero = !!(cb->flags & ATH10K_SKB_F_DTIM_ZERO);
 		deliver_cab = !!(cb->flags & ATH10K_SKB_F_DELIVER_CAB);
-		ret = ath10k_wmi_beacon_send_ref_nowait(arvif->ar,
-							arvif->vdev_id,
+		ret = ath10k_wmi_beacon_send_ref_nowait(arvif,
 							bcn->data, bcn->len,
 							cb->paddr,
 							dtim_zero,
 							deliver_cab);
+		ath10k_dbg(ar, ATH10K_DBG_BEACON,
+			   "wmi event beacon send, vdev-id: %u  rv: %d\n",
+			   arvif->vdev_id, ret);
 
 		spin_lock_bh(&ar->data_lock);
 
@@ -1845,18 +1893,24 @@ static void ath10k_wmi_op_ep_tx_credits(struct ath10k *ar)
 int ath10k_wmi_cmd_send(struct ath10k *ar, struct sk_buff *skb, u32 cmd_id)
 {
 	int ret = -EOPNOTSUPP;
+	int loops = 0;
 
 	might_sleep();
 
 	if (cmd_id == WMI_CMD_UNSUPPORTED) {
 		ath10k_warn(ar, "wmi command %d is not supported by firmware\n",
 			    cmd_id);
+		dev_kfree_skb_any(skb);
 		return ret;
 	}
 
 	wait_event_timeout(ar->wmi.tx_credits_wq, ({
-		/* try to send pending beacons first. they take priority */
-		ath10k_wmi_tx_beacons_nowait(ar);
+		if (loops++ == 0) {
+			/* try to send pending beacons first. they take priority.  But, only
+			 * the first time through this loop. --Ben
+			 */
+			ath10k_wmi_tx_beacons_nowait(ar);
+		}
 
 		ret = ath10k_wmi_cmd_send_nowait(ar, skb, cmd_id);
 
@@ -1872,6 +1926,7 @@ int ath10k_wmi_cmd_send(struct ath10k *ar, struct sk_buff *skb, u32 cmd_id)
 	if (ret == -EAGAIN) {
 		ath10k_warn(ar, "wmi command %d timeout, restarting hardware\n",
 			    cmd_id);
+		set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
 		queue_work(ar->workqueue, &ar->restart_work);
 	}
 
@@ -1962,7 +2017,29 @@ static void ath10k_wmi_event_scan_started(struct ath10k *ar)
 	}
 }
 
-static void ath10k_wmi_event_scan_start_failed(struct ath10k *ar)
+void ath10k_wmi_stop_scan_work(struct work_struct *work)
+{
+	struct ath10k *ar = container_of(work, struct ath10k,
+					 stop_scan_work);
+	/* Kick firmware to get us back in sync */
+	struct wmi_stop_scan_arg arg = {
+		.req_id = 1, /* FIXME */
+		.req_type = WMI_SCAN_STOP_ONE,
+		.u.scan_id = ATH10K_SCAN_ID,
+	};
+	int ret;
+
+	ath10k_warn(ar, "calling wmi-stop-scan from wmi-stop-scan-work\n");
+
+	mutex_lock(&ar->conf_mutex);
+	ret = ath10k_wmi_stop_scan(ar, &arg);
+	if (ret)
+		ath10k_warn(ar, "stop-scan-work: failed to stop wmi scan: %d\n", ret);
+	mutex_unlock(&ar->conf_mutex);
+}
+
+static void ath10k_wmi_event_scan_start_failed(struct ath10k *ar,
+					       enum wmi_scan_completion_reason reason)
 {
 	lockdep_assert_held(&ar->data_lock);
 
@@ -1977,6 +2054,13 @@ static void ath10k_wmi_event_scan_start_failed(struct ath10k *ar)
 	case ATH10K_SCAN_STARTING:
 		complete(&ar->scan.started);
 		__ath10k_scan_finish(ar);
+		if (reason == WMI_SCAN_REASON_BUSY) {
+			/* Cannot make WMI calls directly here, we are under data_lock and at
+			 * least sometimes in IRQ context.
+			 */
+			ath10k_warn(ar, "received scan start failed event in scan-starting state, will request stop-scan-work\n");
+			queue_work(ar->workqueue, &ar->stop_scan_work);
+		}
 		break;
 	}
 }
@@ -2065,6 +2149,8 @@ ath10k_wmi_event_scan_type_str(enum wmi_scan_event_type type,
 			return "completed [timedout]";
 		case WMI_SCAN_REASON_INTERNAL_FAILURE:
 			return "completed [internal err]";
+		case WMI_SCAN_REASON_BUSY:
+			return "completed [failed, busy]";
 		case WMI_SCAN_REASON_MAX:
 			break;
 		}
@@ -2153,8 +2239,11 @@ int ath10k_wmi_event_scan(struct ath10k *ar, struct sk_buff *skb)
 		ath10k_wmi_event_scan_foreign_chan(ar, freq);
 		break;
 	case WMI_SCAN_EVENT_START_FAILED:
-		ath10k_warn(ar, "received scan start failure event\n");
-		ath10k_wmi_event_scan_start_failed(ar);
+		ath10k_warn(ar, "scan-start-failed event %s type %d reason %d freq %d req_id %d scan_id %d vdev_id %d state %s (%d)\n",
+			    ath10k_wmi_event_scan_type_str(event_type, reason),
+			    event_type, reason, freq, req_id, scan_id, vdev_id,
+			    ath10k_scan_state_str(ar->scan.state), ar->scan.state);
+		ath10k_wmi_event_scan_start_failed(ar, reason);
 		break;
 	case WMI_SCAN_EVENT_DEQUEUED:
 	case WMI_SCAN_EVENT_PREEMPTED:
@@ -2206,12 +2295,15 @@ static int ath10k_wmi_op_pull_mgmt_rx_ev(struct ath10k *ar, struct sk_buff *skb,
 					 struct wmi_mgmt_rx_ev_arg *arg)
 {
 	struct wmi_mgmt_rx_event_v1 *ev_v1;
-	struct wmi_mgmt_rx_event_v2 *ev_v2;
+	struct wmi_mgmt_rx_event_v2 *ev_v2 = NULL;
 	struct wmi_mgmt_rx_hdr_v1 *ev_hdr;
 	struct wmi_mgmt_rx_ext_info *ext_info;
 	size_t pull_len;
 	u32 msdu_len;
 	u32 len;
+	int i;
+	u32 snr;
+	u32 channel;
 
 	if (test_bit(ATH10K_FW_FEATURE_EXT_WMI_MGMT_RX,
 		     ar->running_fw->fw_file.fw_features)) {
@@ -2234,6 +2326,27 @@ static int ath10k_wmi_op_pull_mgmt_rx_ev(struct ath10k *ar, struct sk_buff *skb,
 	arg->snr = ev_hdr->snr;
 	arg->phy_mode = ev_hdr->phy_mode;
 	arg->rate = ev_hdr->rate;
+	if (ev_v2)
+		for (i = 0; i<4; i++)
+			arg->rssi_ctl[i] = ev_v2->hdr.rssi_ctl[i];
+
+	snr = __le32_to_cpu(arg->snr);
+	channel = __le32_to_cpu(arg->channel);
+
+	/* Recent CT wave-1 firmware can report per-chain values if properly requested... */
+	if ((snr & 0xFFFFFF00) || (channel & 0xFF000000)) {
+		/* pri20_mhz signal */
+		arg->rssi_ctl[0] = snr >> 8;
+		arg->rssi_ctl[1] = snr >> 16;
+		arg->rssi_ctl[2] = snr >> 24;
+		snr = snr & 0xFF;
+
+		arg->rssi_ctl[3] = channel >> 24;
+		channel = channel & 0xFFFFFF;
+
+		arg->snr = __cpu_to_le32(snr);
+		arg->channel = __cpu_to_le32(channel);
+	}
 
 	msdu_len = __le32_to_cpu(arg->buf_len);
 	if (skb->len < msdu_len)
@@ -2263,6 +2376,7 @@ static int ath10k_wmi_10_4_op_pull_mgmt_rx_ev(struct ath10k *ar,
 	u32 msdu_len;
 	struct wmi_mgmt_rx_ext_info *ext_info;
 	u32 len;
+	int i;
 
 	ev = (struct wmi_10_4_mgmt_rx_event *)skb->data;
 	ev_hdr = &ev->hdr;
@@ -2278,6 +2392,8 @@ static int ath10k_wmi_10_4_op_pull_mgmt_rx_ev(struct ath10k *ar,
 	arg->snr = ev_hdr->snr;
 	arg->phy_mode = ev_hdr->phy_mode;
 	arg->rate = ev_hdr->rate;
+	for (i = 0; i<4; i++)
+		arg->rssi_ctl[i] = ev_hdr->rssi_ctl[i];
 
 	msdu_len = __le32_to_cpu(arg->buf_len);
 	if (skb->len < msdu_len)
@@ -2390,6 +2506,13 @@ int ath10k_wmi_event_mgmt_rx(struct ath10k *ar, struct sk_buff *skb)
 	u32 rate;
 	u16 fc;
 	int ret;
+	int i;
+
+	/* Initialize the rssi to 'ignore-me' value, stock wave-1
+	 * firmware doesn't support it.
+	 */
+	for (i = 0; i<4; i++)
+		arg.rssi_ctl[i] = 0x80;
 
 	ret = ath10k_wmi_pull_mgmt_rx(ar, skb, &arg);
 	if (ret) {
@@ -2448,6 +2571,12 @@ int ath10k_wmi_event_mgmt_rx(struct ath10k *ar, struct sk_buff *skb)
 
 	status->freq = ieee80211_channel_to_frequency(channel, status->band);
 	status->signal = snr + ATH10K_DEFAULT_NOISE_FLOOR;
+	for (i = 0; i<4; i++) {
+		if (arg.rssi_ctl[i] != 0x80) {
+			status->chains |= BIT(i);
+			status->chain_signal[i] = ATH10K_DEFAULT_NOISE_FLOOR + arg.rssi_ctl[i];
+		}
+	}
 	status->rate_idx = ath10k_mac_bitrate_to_idx(sband, rate / 100);
 
 	hdr = (struct ieee80211_hdr *)skb->data;
@@ -2483,8 +2612,11 @@ int ath10k_wmi_event_mgmt_rx(struct ath10k *ar, struct sk_buff *skb)
 		   fc & IEEE80211_FCTL_FTYPE, fc & IEEE80211_FCTL_STYPE);
 
 	ath10k_dbg(ar, ATH10K_DBG_MGMT,
-		   "event mgmt rx freq %d band %d snr %d, rate_idx %d\n",
+		   "event mgmt rx freq %d band %d snr %d chains: 0x%x(%d %d %d %d), rate_idx %d\n",
 		   status->freq, status->band, status->signal,
+		   status->chains,
+		   status->chain_signal[0], status->chain_signal[1],
+		   status->chain_signal[2], status->chain_signal[3],
 		   status->rate_idx);
 
 	ieee80211_rx(ar->hw, skb);
@@ -2645,11 +2777,167 @@ void ath10k_wmi_event_echo(struct ath10k *ar, struct sk_buff *skb)
 
 int ath10k_wmi_event_debug_mesg(struct ath10k *ar, struct sk_buff *skb)
 {
+	struct ath10k_fw_dbglog_report *ev;
+
 	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi event debug mesg len %d\n",
 		   skb->len);
 
 	trace_ath10k_wmi_dbglog(ar, skb->data, skb->len);
+	ev = (struct ath10k_fw_dbglog_report *)skb->data;
 
+	spin_lock_bh(&ar->data_lock);
+	/* First 4 bytes are a messages-dropped-due-to-overflow counter,
+	 * and should not be recorded in the dbglog buffer, so we skip
+	 * them.
+	 */
+	WARN_ON(skb->len & 0x3);
+	ath10k_dbg_save_fw_dbg_buffer(ar, ev->messages,
+				      (skb->len - 4)/sizeof(__le32));
+	spin_unlock_bh(&ar->data_lock);
+
+	if (ath10k_debug_mask & ATH10K_DBG_NO_DBGLOG) {
+		static bool done_once = false;
+		if (!done_once) {
+			ath10k_info(ar, "NOTE:  Firmware DBGLOG output disabled in debug_mask: 0x%x\n",
+				    ath10k_debug_mask);
+			done_once = true;
+		}
+		return 0;
+	}
+
+	if (ev->dropped_count)
+		ath10k_warn(ar, "WARNING: Dropped dbglog buffers: %d\n", __le32_to_cpu(ev->dropped_count));
+
+	if (ath10k_debug_mask & ATH10K_DBG_FW)
+		ath10k_dbg_print_fw_dbg_buffer(ar, ev->messages,
+					       (skb->len - 4)/sizeof(__le32),
+					       KERN_INFO);
+	else
+		ath10k_dbg_print_fw_dbg_buffer(ar, ev->messages,
+					       (skb->len - 4)/sizeof(__le32),
+					       KERN_DEBUG);
+
+	return 0;
+}
+
+int ath10k_wmi_event_csi_mesg(struct ath10k *ar, struct sk_buff *skb)
+{
+	__le32 *ibuf;
+	int q = 0;
+	int len;
+	const char* lvl = KERN_INFO;
+
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi event csi mesg len %d\n",
+		   skb->len);
+
+	ibuf = (__le32*)(skb->data);
+	len = skb->len / 4;
+
+	/* Add to accumulator */
+	if (ar->csi_data_len + skb->len < sizeof(ar->csi_data)) {
+		memcpy(ar->csi_data + ar->csi_data_len, skb->data, skb->len);
+		ar->csi_data_len += skb->len;
+	}
+	else {
+		ath10k_err(ar, "CSI accumulator overflow, csi-data-len: %d  skb->len: %d\n",
+			   ar->csi_data_len, skb->len);
+		goto printme;
+	}
+
+	if (ibuf[len - 1] != 0x444E4544) {
+		// Wait for next one, this one is not the 'DNED'
+		ath10k_dbg(ar, ATH10K_DBG_WMI,
+			   "CSI last: 0x%x, will look for another one, accum-len: %d\n",
+			   ibuf[len - 1], ar->csi_data_len);
+		return 0;
+	}
+
+printme:
+	ibuf = (__le32*)(ar->csi_data);
+	len = ar->csi_data_len / 4;
+
+	/* This is quite noisy, need a better way to get this to user-space. */
+	/* This is the CFR data, channel-frequency-response */
+	dev_printk(lvl, ar->dev, "ath10k_pci ATH10K_CSI_BUFFER:\n");
+	while (q < len) {
+		if (q + 8 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1], ibuf[q+2], ibuf[q+3],
+			       ibuf[q+4], ibuf[q+5], ibuf[q+6], ibuf[q+7]);
+			q += 8;
+		}
+		else if (q + 7 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X %08X %08X %08X %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1], ibuf[q+2], ibuf[q+3],
+			       ibuf[q+4], ibuf[q+5], ibuf[q+6]);
+			q += 7;
+		}
+		else if (q + 6 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X %08X %08X %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1], ibuf[q+2], ibuf[q+3],
+			       ibuf[q+4], ibuf[q+5]);
+			q += 6;
+		}
+		else if (q + 5 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X %08X %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1], ibuf[q+2], ibuf[q+3],
+			       ibuf[q+4]);
+			q += 5;
+		}
+		else if (q + 4 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1], ibuf[q+2], ibuf[q+3]);
+			q += 4;
+		}
+		else if (q + 3 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1], ibuf[q+2]);
+			q += 3;
+		}
+		else if (q + 2 <= len) {
+			printk("%sath10k: [%04d]: %08X %08X\n",
+			       lvl, q,
+			       ibuf[q], ibuf[q+1]);
+			q += 2;
+		}
+		else if (q + 1 <= len) {
+			printk("%sath10k: [%04d]: %08X\n",
+			       lvl, q,
+			       ibuf[q]);
+			q += 1;
+		}
+		else {
+			break;
+		}
+	}/* while */
+
+	ar->csi_data_len = 0; /* reset accumulator */
+	dev_printk(lvl, ar->dev, "ATH10K_END\n");
+	return 0;
+}
+
+int ath10k_wmi_event_txbf_cv_mesg(struct ath10k *ar, struct sk_buff *skb)
+{
+	struct wmi_txbf_cv_event *ev;
+
+	trace_ath10k_wmi_dbglog(ar, skb->data, skb->len);
+	ev = (struct wmi_txbf_cv_event *)skb->data;
+
+	/* NOTE:  cv-pool-idx is zero-based and is specific to the txbf logic.  In current
+	 * 10.4 firmware, this will translate to memory pool 1 since the ratectrl logic grabs the first
+	 * pool-id.
+	 */
+	ath10k_warn(ar, /*ATH10K_DBG_WMI,*/ "wmi event txbf_cv mesg len %d,  vdev: %d peer: %pM cv-pool-idx: %d cv-record-size: %d cv-record-idx: %d type: %d mu-mimo: %d Nc: %d BW: %d Nr: %d cv_size: %d state: %d\n",
+		    skb->len, ev->vdev_id, ev->peer_macaddr.addr, ev->pool_idx,
+		    ev->cv_record_size, ev->cv_record_idx, ev->cv_type,
+		    ev->mu_mimo, ev->Nc, ev->BW, ev->Nr, ev->cv_size,
+		    ev->state);
 	return 0;
 }
 
@@ -2779,6 +3067,14 @@ ath10k_wmi_10_4_pull_peer_stats(const struct wmi_10_4_peer_stats *src,
 	dst->peer_rssi = __le32_to_cpu(src->peer_rssi);
 	dst->peer_tx_rate = __le32_to_cpu(src->peer_tx_rate);
 	dst->peer_rx_rate = __le32_to_cpu(src->peer_rx_rate);
+	/* Firmware stores these internally as 16 bits.  CT firmware may pack
+	 * peer's TX PN into top 16 bits if the user has previously set the
+	 * PN when setting a key or used the ct-special API to enable reporting PN.
+	 */
+	dst->pn = __le32_to_cpu(src->num_pkt_loss_excess_retry[2]) >> 16;
+	dst->pn <<= 32;
+	dst->pn |= (__le32_to_cpu(src->num_pkt_loss_excess_retry[1]) & 0xFFFF0000);
+	dst->pn |= __le32_to_cpu(src->num_pkt_loss_excess_retry[0]) >> 16;
 }
 
 static void
@@ -2862,13 +3158,14 @@ static int ath10k_wmi_10x_op_pull_fw_stats(struct ath10k *ar,
 					   struct ath10k_fw_stats *stats)
 {
 	const struct wmi_stats_event *ev = (void *)skb->data;
-	u32 num_pdev_stats, num_peer_stats;
+	u32 num_pdev_stats, num_vdev_stats, num_peer_stats;
 	int i;
 
 	if (!skb_pull(skb, sizeof(*ev)))
 		return -EPROTO;
 
 	num_pdev_stats = __le32_to_cpu(ev->num_pdev_stats);
+	num_vdev_stats = __le32_to_cpu(ev->num_vdev_stats);
 	num_peer_stats = __le32_to_cpu(ev->num_peer_stats);
 
 	for (i = 0; i < num_pdev_stats; i++) {
@@ -2891,14 +3188,47 @@ static int ath10k_wmi_10x_op_pull_fw_stats(struct ath10k *ar,
 		list_add_tail(&dst->list, &stats->pdevs);
 	}
 
-	/* fw doesn't implement vdev stats */
+	/* (stock) fw doesn't implement vdev stats */
+	for (i = 0; i < num_vdev_stats; i++) {
+		const struct wmi_vdev_stats_ct *src = (void *)(skb->data);
+		struct ath10k_fw_stats_vdev *dst;
+		int sz;
+
+		if (!skb_pull(skb, sizeof(*src)))
+			return -EPROTO;
+
+		/* Look for any existing vdev */
+		dst = kzalloc(sizeof(*dst), GFP_ATOMIC);
+		if (!dst)
+			continue;
+
+		sz = __le32_to_cpu(src->size);
+		dst->vdev_id = src->vdev_id;
+		dst->tsf64 = __le32_to_cpu(src->tsf_hi);
+		dst->tsf64 <<= 32;
+		dst->tsf64 |= __le32_to_cpu(src->tsf_lo);
+
+		list_add_tail(&dst->list, &stats->vdevs);
+
+		if (sz > sizeof(*src)) {
+			/* Discard any extra for forwards-compat */
+			if (!skb_pull(skb, sz - sizeof(*src)))
+				return -EPROTO;
+		}
+	}
 
 	for (i = 0; i < num_peer_stats; i++) {
 		const struct wmi_10x_peer_stats *src;
 		struct ath10k_fw_stats_peer *dst;
+		int stats_len;
+
+		if (test_bit(WMI_SERVICE_PEER_STATS, ar->wmi.svc_map))
+			stats_len = sizeof(struct wmi_10x_peer_stats_ct_ext);
+		else
+			stats_len = sizeof(*src);
 
 		src = (void *)skb->data;
-		if (!skb_pull(skb, sizeof(*src)))
+		if (!skb_pull(skb, stats_len))
 			return -EPROTO;
 
 		dst = kzalloc(sizeof(*dst), GFP_ATOMIC);
@@ -2908,6 +3238,11 @@ static int ath10k_wmi_10x_op_pull_fw_stats(struct ath10k *ar,
 		ath10k_wmi_pull_peer_stats(&src->old, dst);
 
 		dst->peer_rx_rate = __le32_to_cpu(src->peer_rx_rate);
+
+		if (ath10k_peer_stats_enabled(ar)) {
+			struct wmi_10x_peer_stats_ct_ext *src2 = (void*)(src);
+			dst->rx_duration = __le32_to_cpu(src2->rx_duration);
+		}
 
 		list_add_tail(&dst->list, &stats->peers);
 	}
@@ -2947,6 +3282,9 @@ static int ath10k_wmi_10_2_op_pull_fw_stats(struct ath10k *ar,
 		ath10k_wmi_pull_pdev_stats_base(&src->base, dst);
 		ath10k_wmi_pull_pdev_stats_tx(&src->tx, dst);
 		ath10k_wmi_pull_pdev_stats_rx(&src->rx, dst);
+		dst->rx_timeout_errs = __le32_to_cpu(src->pdev_rx_timeout);
+		dst->dram_free = __le32_to_cpu(src->mem.dram_free);
+		dst->iram_free = __le32_to_cpu(src->mem.iram_free);
 		ath10k_wmi_pull_pdev_stats_extra(&src->extra, dst);
 		/* FIXME: expose 10.2 specific values */
 
@@ -3116,7 +3454,11 @@ static int ath10k_wmi_10_4_op_pull_fw_stats(struct ath10k *ar,
 		ath10k_wmi_pull_pdev_stats_base(&src->base, dst);
 		ath10k_wmi_10_4_pull_pdev_stats_tx(&src->tx, dst);
 		ath10k_wmi_pull_pdev_stats_rx(&src->rx, dst);
+		dst->rx_timeout_errs = __le32_to_cpu(src->pdev_rx_timeout);
 		dst->rx_ovfl_errs = __le32_to_cpu(src->rx_ovfl_errs);
+		dst->dram_free = __le32_to_cpu(src->mem.dram_free);
+		dst->iram_free = __le32_to_cpu(src->mem.iram_free);
+		dst->sram_free = __le32_to_cpu(src->mem.sram_free);
 		ath10k_wmi_pull_pdev_stats_extra(&src->extra, dst);
 
 		list_add_tail(&dst->list, &stats->pdevs);
@@ -3247,18 +3589,31 @@ void ath10k_wmi_event_vdev_start_resp(struct ath10k *ar, struct sk_buff *skb)
 {
 	struct wmi_vdev_start_ev_arg arg = {};
 	int ret;
+	u32 status;
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI, "WMI_VDEV_START_RESP_EVENTID\n");
+
+	ar->last_wmi_vdev_start_status = 0;
 
 	ret = ath10k_wmi_pull_vdev_start(ar, skb, &arg);
 	if (ret) {
 		ath10k_warn(ar, "failed to parse vdev start event: %d\n", ret);
-		return;
+		ar->last_wmi_vdev_start_status = ret;
+		goto out;
 	}
 
-	if (WARN_ON(__le32_to_cpu(arg.status)))
-		return;
+	status = __le32_to_cpu(arg.status);
+	if (WARN_ON_ONCE(status)) {
+		ath10k_warn(ar, "vdev-start-response reports status error: %d (%s)\n",
+			    status, (status == WMI_VDEV_START_CHAN_INVALID) ?
+			    "chan-invalid" : "unknown");
+		/* Setup is done one way or another though, so we should still
+		 * do the completion, so don't return here.
+		 */
+		ar->last_wmi_vdev_start_status = -EINVAL;
+	}
 
+out:
 	complete(&ar->vdev_setup_done);
 }
 
@@ -3279,6 +3634,9 @@ ath10k_wmi_op_pull_peer_kick_ev(struct ath10k *ar, struct sk_buff *skb,
 
 	skb_pull(skb, sizeof(*ev));
 	arg->mac_addr = ev->peer_macaddr.addr;
+
+	/* CT Firmware may sneak in some info in the un-used space. */
+	arg->unused_hi = __le32_to_cpu(ev->peer_macaddr.word1) >> 16;
 
 	return 0;
 }
@@ -3753,6 +4111,8 @@ void ath10k_wmi_event_tbttoffset_update(struct ath10k *ar, struct sk_buff *skb)
 	ath10k_dbg(ar, ATH10K_DBG_WMI, "WMI_TBTTOFFSET_UPDATE_EVENTID\n");
 }
 
+
+
 static void ath10k_radar_detected(struct ath10k *ar)
 {
 	ath10k_dbg(ar, ATH10K_DBG_REGULATORY, "dfs radar detected\n");
@@ -3828,6 +4188,10 @@ static void ath10k_dfs_radar_report(struct ath10k *ar,
 	u8 rssi, width;
 	struct ath10k_radar_found_info *radar_info;
 
+#ifdef ATH_HAVE_PULSE_EVENT_MSG
+	pe.msg[0] = 0;
+#endif
+
 	reg0 = __le32_to_cpu(rr->reg0);
 	reg1 = __le32_to_cpu(rr->reg1);
 
@@ -3845,9 +4209,9 @@ static void ath10k_dfs_radar_report(struct ath10k *ar,
 		   MS(reg1, RADAR_REPORT_REG1_PULSE_AGC_MB_GAIN),
 		   MS(reg1, RADAR_REPORT_REG1_PULSE_SUBCHAN_MASK));
 	ath10k_dbg(ar, ATH10K_DBG_REGULATORY,
-		   "wmi phyerr radar report pulse_tsf_offset 0x%X pulse_dur: %d\n",
+		   "wmi phyerr radar report pulse_tsf_offset 0x%X pulse_dur: %d dfs-detector: %p\n",
 		   MS(reg1, RADAR_REPORT_REG1_PULSE_TSF_OFFSET),
-		   MS(reg1, RADAR_REPORT_REG1_PULSE_DUR));
+		   MS(reg1, RADAR_REPORT_REG1_PULSE_DUR), ar->dfs_detector);
 
 	if (!ar->dfs_detector)
 		return;
@@ -3886,8 +4250,8 @@ static void ath10k_dfs_radar_report(struct ath10k *ar,
 	pe.rssi = rssi;
 	pe.chirp = (MS(reg0, RADAR_REPORT_REG0_PULSE_IS_CHIRP) != 0);
 	ath10k_dbg(ar, ATH10K_DBG_REGULATORY,
-		   "dfs add pulse freq: %d, width: %d, rssi %d, tsf: %llX\n",
-		   pe.freq, pe.width, pe.rssi, pe.ts);
+		   "dfs add pulse freq: %d, width: %d, rssi %d, tsf: %llX chirp: %d\n",
+		   pe.freq, pe.width, pe.rssi, pe.ts, pe.chirp);
 
 	ATH10K_DFS_STAT_INC(ar, pulses_detected);
 
@@ -3930,6 +4294,16 @@ static void ath10k_dfs_radar_report(struct ath10k *ar,
 	}
 
 radar_detected:
+
+#ifdef ATH_HAVE_PULSE_EVENT_MSG /* so we can compile out-of-tree easier */
+	if (pe.msg[0]) {
+		strncpy(ar->debug.dfs_last_msg, pe.msg,
+			sizeof(ar->debug.dfs_last_msg));
+		/* ensure null term */
+		ar->debug.dfs_last_msg[sizeof(ar->debug.dfs_last_msg) - 1] = 0;
+	}
+#endif
+
 	ath10k_radar_detected(ar);
 }
 
@@ -4369,7 +4743,7 @@ void ath10k_wmi_event_profile_match(struct ath10k *ar, struct sk_buff *skb)
 
 void ath10k_wmi_event_debug_print(struct ath10k *ar, struct sk_buff *skb)
 {
-	char buf[101], c;
+	char buf[WMI_MAX_DEBUG_MESG + 1], c;
 	int i;
 
 	for (i = 0; i < sizeof(buf) - 1; i++) {
@@ -4397,7 +4771,7 @@ void ath10k_wmi_event_debug_print(struct ath10k *ar, struct sk_buff *skb)
 	/* the last byte is always reserved for the null character */
 	buf[i] = '\0';
 
-	ath10k_dbg(ar, ATH10K_DBG_WMI_PRINT, "wmi print '%s'\n", buf);
+	ath10k_info(ar, "wmi print '%s'\n", buf);
 }
 
 void ath10k_wmi_event_pdev_qvit(struct ath10k *ar, struct sk_buff *skb)
@@ -5278,6 +5652,19 @@ static void ath10k_wmi_event_service_ready_work(struct work_struct *work)
 	ath10k_dbg_dump(ar, ATH10K_DBG_WMI, NULL, "wmi svc: ",
 			arg.service_map, arg.service_map_len);
 
+	// RX Sw Crypt mode, which uses raw receive and disables some HW rx logic,
+	// appears to break receiving MU-MIMO properly, so tweak that here.
+	if (test_bit(ATH10K_FW_FEATURE_CT_RXSWCRYPT,
+		     ar->running_fw->fw_file.fw_features) &&
+	    ar->request_nohwcrypt)
+		ar->vht_cap_info &= ~IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE;
+
+	if (ar->request_nobeamform_mu)
+		ar->vht_cap_info &= ~(IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE | IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE);
+
+	if (ar->request_nobeamform_su)
+		ar->vht_cap_info &= ~(IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE | IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE);
+
 	if (ar->num_rf_chains > ar->max_spatial_stream) {
 		ath10k_warn(ar, "hardware advertises support for more spatial streams than it should (%d > %d)\n",
 			    ar->num_rf_chains, ar->max_spatial_stream);
@@ -5299,6 +5686,20 @@ static void ath10k_wmi_event_service_ready_work(struct work_struct *work)
 			 ar->fw_version_build);
 	}
 
+	if ((ar->eeprom_regdom != -1) &&
+	    (ar->eeprom_regdom != ar->ath_common.regulatory.current_rd)) {
+		if (!ar->eeprom_regdom_warned) {
+			ath10k_err(ar, "DANGER! You're overriding EEPROM-defined regulatory domain\n");
+			ath10k_err(ar, "from: 0x%x to 0x%x (svc-ready-work)\n",
+				   ar->ath_common.regulatory.current_rd, ar->eeprom_regdom);
+			ath10k_err(ar, "Your card was not certified to operate in the domain you chose.\n");
+			ath10k_err(ar, "This might result in a violation of your local regulatory rules.\n");
+			ath10k_err(ar, "Do not ever do this unless you really know what you are doing!\n");
+			ar->eeprom_regdom_warned = 1;
+		}
+		ar->ath_common.regulatory.current_rd = ar->eeprom_regdom | COUNTRY_ERD_FLAG;
+	}
+
 	num_mem_reqs = __le32_to_cpu(arg.num_mem_reqs);
 	if (num_mem_reqs > WMI_MAX_MEM_REQS) {
 		ath10k_warn(ar, "requested memory chunks number (%d) exceeds the limit\n",
@@ -5307,18 +5708,28 @@ static void ath10k_wmi_event_service_ready_work(struct work_struct *work)
 	}
 
 	if (test_bit(WMI_SERVICE_PEER_CACHING, ar->wmi.svc_map)) {
-		if (test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL,
-			     ar->running_fw->fw_file.fw_features))
-			ar->num_active_peers = TARGET_10_4_QCACHE_ACTIVE_PEERS_PFC +
-					       ar->max_num_vdevs;
-		else
-			ar->num_active_peers = TARGET_10_4_QCACHE_ACTIVE_PEERS +
-					       ar->max_num_vdevs;
 
-		ar->max_num_peers = TARGET_10_4_NUM_QCACHE_PEERS_MAX +
-				    ar->max_num_vdevs;
-		ar->num_tids = ar->num_active_peers * 2;
-		ar->max_num_stations = TARGET_10_4_NUM_QCACHE_PEERS_MAX;
+		/* Don't over-ride user-specified config here, but otherwise,
+		 * adjust in case we are using PEER caching.
+		 */
+		if (!(ar->fwcfg.flags & ATH10K_FWCFG_ACTIVE_PEERS)) {
+			if (test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL,
+				     ar->running_fw->fw_file.fw_features))
+				ar->num_active_peers = TARGET_10_4_QCACHE_ACTIVE_PEERS_PFC +
+					ar->max_num_vdevs;
+			else
+				ar->num_active_peers = TARGET_10_4_QCACHE_ACTIVE_PEERS +
+					ar->max_num_vdevs;
+		}
+
+		if (!(ar->fwcfg.flags & ATH10K_FWCFG_PEERS))
+			ar->max_num_peers = TARGET_10_4_NUM_QCACHE_PEERS_MAX +
+				ar->max_num_vdevs;
+
+		if (!(ar->fwcfg.flags & ATH10K_FWCFG_NUM_TIDS))
+			ar->num_tids = ar->num_active_peers * 2;
+		if (!(ar->fwcfg.flags & ATH10K_FWCFG_STATIONS))
+			ar->max_num_stations = TARGET_10_4_NUM_QCACHE_PEERS_MAX;
 	}
 
 	/* TODO: Adjust max peer count for cases like WMI_SERVICE_RATECTRL_CACHE
@@ -5359,6 +5770,15 @@ static void ath10k_wmi_event_service_ready_work(struct work_struct *work)
 			num_units = ar->max_num_vdevs + 1;
 		}
 
+		/* NOTE:  For 10.4 firmware, req-id appears to be this (grep MEM_REQ_ID in firmware src):
+		   1:  rate-ctrl
+		   2:  txbf-cv-pool0  (log-size 8)
+		   3:  txbf-cv-pool1  (log-size 10)
+		   4:  txbf-cv-pool2  (log-size 12)
+		   5:  peer-cache
+		   6:  scan-channel CAL data
+		   7:  home-channel CAL data
+		*/
 		ath10k_dbg(ar, ATH10K_DBG_WMI,
 			   "wmi mem_req_id %d num_units %d num_unit_info %d unit size %d actual units %d\n",
 			   req_id,
@@ -5485,11 +5905,132 @@ static int ath10k_wmi_event_temperature(struct ath10k *ar, struct sk_buff *skb)
 	const struct wmi_pdev_temperature_event *ev;
 
 	ev = (struct wmi_pdev_temperature_event *)skb->data;
+
 	if (WARN_ON(skb->len < sizeof(*ev)))
 		return -EPROTO;
 
 	ath10k_thermal_event_temperature(ar, __le32_to_cpu(ev->temperature));
 	return 0;
+}
+
+
+static void ath10k_wmi_process_generic_buffer(struct ath10k* ar, const struct wmi_generic_buffer_event *ev,
+					      u32 len, u8 *buf)
+{
+	u32 type = __le32_to_cpu(ev->buf_type);
+	switch (type) {
+	case WMI_BUFFER_TYPE_RATEPWR_TABLE:
+#ifdef CONFIG_ATH10K_DEBUGFS
+		if (len > sizeof(ar->debug.ratepwr_tbl)) {
+			ath10k_err(ar, "wmi-generic, len: %u > ratepwr-table length: %d\n",
+				   len, (int)(sizeof(ar->debug.ratepwr_tbl)));
+		}
+		else {
+			memcpy(&ar->debug.ratepwr_tbl, buf, len);
+			ar->debug.ratepwr_tbl_len = len;
+			complete(&ar->debug.ratepwr_tbl_complete);
+		}
+		break;
+#endif
+	case WMI_BUFFER_TYPE_CTL_TABLE:
+#ifdef CONFIG_ATH10K_DEBUGFS
+		if (len > sizeof(ar->debug.powerctl_tbl)) {
+			ath10k_err(ar, "wmi-generic, len: %u > powerctl-table length: %d\n",
+				   len, (int)(sizeof(ar->debug.powerctl_tbl)));
+		}
+		else {
+			memcpy(&ar->debug.powerctl_tbl, buf, len);
+			ar->debug.powerctl_tbl_len = len;
+			complete(&ar->debug.powerctl_tbl_complete);
+		}
+		break;
+#endif
+	default:
+		ath10k_dbg(ar, ATH10K_DBG_WMI,
+			   "wmi generic event type: %d is not currently handled.\n",
+			   type);
+	}
+}
+
+static void ath10k_wmi_generic_buffer_eventid(struct ath10k *ar, struct sk_buff *skb)
+{
+	const struct wmi_generic_buffer_event *ev;
+	u32 len;
+	u32 more_frag;
+
+	ev = (struct wmi_generic_buffer_event *)skb->data;
+
+	if (WARN_ON_ONCE(skb->len < sizeof(*ev)))
+		return;
+
+	len = __le32_to_cpu(ev->buf_len);
+	more_frag = __le32_to_cpu(ev->more_frag);
+
+	ath10k_info(ar, "wmi event generic-buffer, type: %d  frag-id: %d more-frag: %d  buf-len: %d\n",
+		    __le32_to_cpu(ev->buf_type), __le32_to_cpu(ev->frag_id), more_frag, len);
+
+	/* Firmware can send us chunked messages, store them up until we have last message */
+	/* Firmware can also run out of buffers and send us incomplete series, deal with that. */
+	if (ar->wmi.gen_buf_len && ar->wmi.last_generic_event.buf_type != ev->buf_type) {
+		ath10k_info(ar, "wmi event generic-buffer, type: %d  frag-id: %d more-frag: %d  buf-len: %d, cur-len: %d  last-generic-type: %d\n",
+			    __le32_to_cpu(ev->buf_type), __le32_to_cpu(ev->frag_id), more_frag, len,
+			    ar->wmi.gen_buf_len, __le32_to_cpu(ar->wmi.last_generic_event.buf_type));
+		ar->wmi.gen_buf_len = 0; /* Start over, something was weird */
+	}
+
+	if (ar->wmi.gen_buf_len + len > sizeof(ar->wmi.gen_buffer)) {
+		ath10k_info(ar, "wmi event generic-buffer, type: %d  frag-id: %d more-frag: %d  buf-len: %d, cur-len: %d, max-allowed: %d (MESSAGE_TOO_LONG)\n",
+			    __le32_to_cpu(ev->buf_type), __le32_to_cpu(ev->frag_id), more_frag, len,
+			    ar->wmi.gen_buf_len, (int)(sizeof(ar->wmi.gen_buffer)));
+		ar->wmi.gen_buf_len = 0; /* Start over, something was weird */
+	}
+
+	memcpy(ar->wmi.gen_buffer + ar->wmi.gen_buf_len, ev->buf_info, len);
+	ar->wmi.gen_buf_len += len;
+
+	if (!more_frag) {
+		ath10k_wmi_process_generic_buffer(ar, ev, ar->wmi.gen_buf_len, ar->wmi.gen_buffer);
+		ar->wmi.gen_buf_len = 0;
+	}
+	else {
+		memcpy(&ar->wmi.last_generic_event, ev, sizeof(*ev));
+	}
+}
+
+static void ath10k_wmi_event_beacon_tx(struct ath10k *ar, struct sk_buff *skb)
+{
+	struct ath10k_vif *arvif;
+	const struct wmi_beacon_tx_event *ev;
+	u32 vdev_id;
+	u32 status;
+
+	spin_lock_bh(&ar->data_lock);
+
+	ev = (struct wmi_beacon_tx_event *)skb->data;
+
+	if (WARN_ON_ONCE(skb->len < sizeof(*ev)))
+		goto exit;
+
+	vdev_id = __le32_to_cpu(ev->vdev_id);
+	status = __le32_to_cpu(ev->tx_status);
+
+	ath10k_dbg(ar, ATH10K_DBG_BEACON,
+		   "wmi event beacon-tx-complete, vdev-id: %u  completion-status: 0x%x (%s) tried: %d failed: %d ratecode: 0x%x rateflags: 0x%x  tsFlags: 0x%x\n",
+		   vdev_id, status,
+		   status == 0 ? "OK" : (status == 1 ? "XRETRY" : (status == 2 ? "DROP" : "UNKNOWN")),
+		   ev->mpdus_tried, ev->mpdus_failed, ev->tx_rate_code, ev->tx_rate_flags, ev->tsFlags);
+
+	arvif = ath10k_get_arvif(ar, vdev_id);
+	if (!arvif) {
+		ath10k_warn(ar, "wmi-event-beacon-tx, could not find vdev for id: %u\n",
+			    vdev_id);
+		goto exit;
+	}
+
+	complete(&arvif->beacon_tx_done);
+
+exit:
+	spin_unlock_bh(&ar->data_lock);
 }
 
 static int ath10k_wmi_event_pdev_bss_chan_info(struct ath10k *ar,
@@ -5555,7 +6096,11 @@ static inline void ath10k_wmi_queue_set_coverage_class_work(struct ath10k *ar)
 		 * coverage class has a non-zero value.
 		 */
 		if (ar->fw_coverage.coverage_class)
-			queue_work(ar->workqueue, &ar->set_coverage_class_work);
+			if (!(test_bit(ATH10K_FW_FEATURE_SET_SPECIAL_CT,
+				       ar->running_fw->fw_file.fw_features) &&
+			      ar->eeprom_overrides.coverage_already_set))
+
+				queue_work(ar->workqueue, &ar->set_coverage_class_work);
 
 		spin_unlock_bh(&ar->data_lock);
 	}
@@ -5680,7 +6225,7 @@ static void ath10k_wmi_op_rx(struct ath10k *ar, struct sk_buff *skb)
 		ath10k_wmi_event_service_available(ar, skb);
 		break;
 	default:
-		ath10k_warn(ar, "Unknown eventid: %d\n", id);
+		ath10k_warn(ar, "Unknown (main) eventid: %d\n", id);
 		break;
 	}
 
@@ -5810,8 +6355,20 @@ static void ath10k_wmi_10_1_op_rx(struct ath10k *ar, struct sk_buff *skb)
 	case WMI_10X_PDEV_UTF_EVENTID:
 		/* ignore utf events */
 		break;
+	case WMI_10_1_PDEV_TEMPERATURE_EVENTID: /* Newer CT firmware supports this */
+		ath10k_wmi_event_temperature(ar, skb);
+		break;
+	case WMI_10_1_PDEV_BSS_CHAN_INFO_EVENTID: /* Newer CT firmware supports this */
+		ath10k_wmi_event_pdev_bss_chan_info(ar, skb);
+		break;
+	case WMI_10_1_BEACON_TX_EVENTID: /* Feb 28, 2019 CT firmware supports this */
+		ath10k_wmi_event_beacon_tx(ar, skb);
+		break;
+	case WMI_10_1_GENERIC_BUFFER_EVENTID: /* April 2, 2019 CT firmware supports this */
+		ath10k_wmi_generic_buffer_eventid(ar, skb);
+		break;
 	default:
-		ath10k_warn(ar, "Unknown eventid: %d\n", id);
+		ath10k_warn(ar, "Unknown (10.1) eventid: %d\n", id);
 		break;
 	}
 
@@ -5957,7 +6514,7 @@ static void ath10k_wmi_10_2_op_rx(struct ath10k *ar, struct sk_buff *skb)
 			   "received event id %d not implemented\n", id);
 		break;
 	default:
-		ath10k_warn(ar, "Unknown eventid: %d\n", id);
+		ath10k_warn(ar, "Unknown (10.2) eventid: %d\n", id);
 		break;
 	}
 
@@ -6066,6 +6623,11 @@ static void ath10k_wmi_10_4_op_rx(struct ath10k *ar, struct sk_buff *skb)
 		break;
 	case WMI_10_4_TDLS_PEER_EVENTID:
 		ath10k_wmi_handle_tdls_peer_event(ar, skb);
+	case WMI_10_4_TXBF_CV_MESG_EVENTID:
+		ath10k_wmi_event_txbf_cv_mesg(ar, skb);
+		break;
+	case WMI_10_4_BEACON_TX_EVENTID: /* Feb 28, 2019 CT firmware supports this */
+		ath10k_wmi_event_beacon_tx(ar, skb);
 		break;
 	case WMI_10_4_PDEV_TPC_TABLE_EVENTID:
 		ath10k_wmi_event_tpc_final_table(ar, skb);
@@ -6073,8 +6635,11 @@ static void ath10k_wmi_10_4_op_rx(struct ath10k *ar, struct sk_buff *skb)
 	case WMI_10_4_DFS_STATUS_CHECK_EVENTID:
 		ath10k_wmi_event_dfs_status_check(ar, skb);
 		break;
+	case WMI_10_4_CSI_MESG_EVENTID:
+		ath10k_wmi_event_csi_mesg(ar, skb);
+		break;
 	default:
-		ath10k_warn(ar, "Unknown eventid: %d\n", id);
+		ath10k_warn(ar, "Unknown (10.4) eventid: %d\n", id);
 		break;
 	}
 
@@ -6118,6 +6683,91 @@ int ath10k_wmi_connect(struct ath10k *ar)
 	}
 
 	ar->wmi.eid = conn_resp.eid;
+	return 0;
+}
+
+int ath10k_wmi_request_ratepwr_tbl(struct ath10k *ar)
+{
+	struct qca9880_pdev_ratepwr_table_cmd *cmd;
+	struct sk_buff *skb;
+
+	skb = ath10k_wmi_alloc_skb(ar, sizeof(*cmd));
+	if (!skb)
+		return ENOMEM;
+
+	cmd = (struct qca9880_pdev_ratepwr_table_cmd *)skb->data;
+
+	cmd->op = __cpu_to_le32(RATEPWR_TABLE_OPS_GET);
+
+	return ath10k_wmi_cmd_send(ar, skb, ar->wmi.cmd->pdev_ratepwr_table_cmdid);
+}
+
+int ath10k_wmi_request_powerctl_tbl(struct ath10k *ar)
+{
+	struct qca9880_pdev_ratepwr_table_cmd *cmd;
+	struct sk_buff *skb;
+
+	skb = ath10k_wmi_alloc_skb(ar, sizeof(*cmd));
+	if (!skb)
+		return ENOMEM;
+
+	cmd = (struct qca9880_pdev_ratepwr_table_cmd *)skb->data;
+
+	cmd->op = __cpu_to_le32(RATEPWR_TABLE_OPS_GET_CTL); /* CT FW only */
+
+	return ath10k_wmi_cmd_send(ar, skb, ar->wmi.cmd->pdev_ratepwr_table_cmdid);
+}
+
+/* This is for 988x wave-1 firmware.  Probably wave-2 is different WMI API */
+int ath10k_wmi_set_power_ctrl_tbl(struct ath10k *ar, int len, u8* data)
+{
+	struct qca9880_set_ctl_table_cmd *cmd;
+	struct sk_buff *skb;
+
+	if (len != sizeof(struct qca9880_power_ctrl))
+		return EINVAL;
+
+	skb = ath10k_wmi_alloc_skb(ar, 4 + sizeof(struct qca9880_power_ctrl));
+	if (!skb)
+		return ENOMEM;
+
+	cmd = (struct qca9880_set_ctl_table_cmd *)skb->data;
+
+	cmd->ctl_len = __cpu_to_le32(len);
+	memcpy(cmd->ctl_info, data, len);
+
+	return ath10k_wmi_cmd_send(ar, skb, ar->wmi.cmd->pdev_set_ctl_table_cmdid);
+}
+
+int ath10k_wmi_check_apply_board_power_ctl_table(struct ath10k *ar)
+{
+	if (ar->eeprom_overrides.apply_board_power_ctl_table) {
+		if (ar->hw_params.id == QCA988X_HW_2_0_VERSION) {
+			int offset2g = 806;
+			int offset5g = 1572;
+			int len;
+			u8* buf;
+			int ret;
+
+			len = sizeof(struct qca9880_power_ctrl);
+			buf = kmalloc(len, GFP_KERNEL);
+			memcpy(buf, ((u8*)(ar->normal_mode_fw.board_data)) + offset2g, 72 + 72);
+			memcpy(buf + 72 + 72, ((u8*)(ar->normal_mode_fw.board_data)) + offset5g, 144 + 144);
+			if (WARN_ON(len != (72 + 72 + 144 + 144)))
+				return EINVAL;
+			ret = ath10k_wmi_set_power_ctrl_tbl(ar, len, buf);
+			if (ret != 0) {
+				ath10k_warn(ar, "Failed to set power ctrl table, len: %d rv: %d\n",
+					    len, ret);
+			}
+			return ret;
+		}
+		else {
+			ath10k_info(ar, "board_power_ctl_table override not supported for board-id: %d\n",
+				    ar->hw_params.id);
+			return EINVAL;
+		}
+	}
 	return 0;
 }
 
@@ -6225,6 +6875,31 @@ ath10k_wmi_op_gen_pdev_set_param(struct ath10k *ar, u32 id, u32 value)
 	return skb;
 }
 
+static struct sk_buff *
+ath10k_wmi_op_gen_pdev_set_fwtest(struct ath10k *ar, u32 id, u32 value)
+{
+	struct wmi_fwtest_set_param_cmd *cmd;
+	struct sk_buff *skb;
+
+	if (id == WMI_PDEV_PARAM_UNSUPPORTED) {
+		ath10k_warn(ar, "fwtest param %d not supported by firmware\n",
+			    id);
+		return ERR_PTR(-EOPNOTSUPP);
+	}
+
+	skb = ath10k_wmi_alloc_skb(ar, sizeof(*cmd));
+	if (!skb)
+		return ERR_PTR(-ENOMEM);
+
+	cmd = (struct wmi_fwtest_set_param_cmd *)skb->data;
+	cmd->param_id    = __cpu_to_le32(id);
+	cmd->param_value = __cpu_to_le32(value);
+
+	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi fwtest set param %d value %d\n",
+		   id, value);
+	return skb;
+}
+
 void ath10k_wmi_put_host_mem_chunks(struct ath10k *ar,
 				    struct wmi_host_mem_chunks *chunks)
 {
@@ -6254,8 +6929,8 @@ static struct sk_buff *ath10k_wmi_op_gen_init(struct ath10k *ar)
 	struct wmi_resource_config config = {};
 	u32 len, val;
 
-	config.num_vdevs = __cpu_to_le32(TARGET_NUM_VDEVS);
-	config.num_peers = __cpu_to_le32(TARGET_NUM_PEERS);
+	config.num_vdevs = __cpu_to_le32(ar->max_num_vdevs);
+	config.num_peers = __cpu_to_le32(ar->max_num_peers);
 	config.num_offload_peers = __cpu_to_le32(TARGET_NUM_OFFLOAD_PEERS);
 
 	config.num_offload_reorder_bufs =
@@ -6263,7 +6938,7 @@ static struct sk_buff *ath10k_wmi_op_gen_init(struct ath10k *ar)
 
 	config.num_peer_keys = __cpu_to_le32(TARGET_NUM_PEER_KEYS);
 	config.num_tids = __cpu_to_le32(TARGET_NUM_TIDS);
-	config.ast_skid_limit = __cpu_to_le32(TARGET_AST_SKID_LIMIT);
+	config.ast_skid_limit = __cpu_to_le32(ar->skid_limit);
 	config.tx_chain_mask = __cpu_to_le32(TARGET_TX_CHAIN_MASK);
 	config.rx_chain_mask = __cpu_to_le32(TARGET_RX_CHAIN_MASK);
 	config.rx_timeout_pri_vo = __cpu_to_le32(TARGET_RX_TIMEOUT_LO_PRI);
@@ -6274,8 +6949,7 @@ static struct sk_buff *ath10k_wmi_op_gen_init(struct ath10k *ar)
 	config.scan_max_pending_reqs =
 		__cpu_to_le32(TARGET_SCAN_MAX_PENDING_REQS);
 
-	config.bmiss_offload_max_vdev =
-		__cpu_to_le32(TARGET_BMISS_OFFLOAD_MAX_VDEV);
+	config.bmiss_offload_max_vdev = __cpu_to_le32(ar->bmiss_offload_max_vdev);
 
 	config.roam_offload_max_vdev =
 		__cpu_to_le32(TARGET_ROAM_OFFLOAD_MAX_VDEV);
@@ -6327,29 +7001,98 @@ static struct sk_buff *ath10k_wmi_10_1_op_gen_init(struct ath10k *ar)
 	struct wmi_resource_config_10x config = {};
 	u32 len, val;
 
-	config.num_vdevs = __cpu_to_le32(TARGET_10X_NUM_VDEVS);
-	config.num_peers = __cpu_to_le32(TARGET_10X_NUM_PEERS);
-	config.num_peer_keys = __cpu_to_le32(TARGET_10X_NUM_PEER_KEYS);
-	config.num_tids = __cpu_to_le32(TARGET_10X_NUM_TIDS);
-	config.ast_skid_limit = __cpu_to_le32(TARGET_10X_AST_SKID_LIMIT);
-	config.tx_chain_mask = __cpu_to_le32(TARGET_10X_TX_CHAIN_MASK);
-	config.rx_chain_mask = __cpu_to_le32(TARGET_10X_RX_CHAIN_MASK);
-	config.rx_timeout_pri_vo = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
-	config.rx_timeout_pri_vi = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
-	config.rx_timeout_pri_be = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
-	config.rx_timeout_pri_bk = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_HI_PRI);
 	config.rx_decap_mode = __cpu_to_le32(ar->wmi.rx_decap_mode);
-	config.scan_max_pending_reqs =
-		__cpu_to_le32(TARGET_10X_SCAN_MAX_PENDING_REQS);
+	config.num_vdevs = __cpu_to_le32(ar->max_num_vdevs);
+	config.num_peers = __cpu_to_le32(ar->max_num_peers);
 
-	config.bmiss_offload_max_vdev =
-		__cpu_to_le32(TARGET_10X_BMISS_OFFLOAD_MAX_VDEV);
+	ath10k_warn(ar, "10.1 wmi init: vdevs: %d  peers: %d  tid: %d\n",
+		    ar->max_num_vdevs, ar->max_num_peers, ar->num_tids);
+
+	config.tx_chain_mask = __cpu_to_le32(TARGET_10X_TX_CHAIN_MASK);
 
 	config.roam_offload_max_vdev =
 		__cpu_to_le32(TARGET_10X_ROAM_OFFLOAD_MAX_VDEV);
 
 	config.roam_offload_max_ap_profiles =
 		__cpu_to_le32(TARGET_10X_ROAM_OFFLOAD_MAX_AP_PROFILES);
+	config.num_peer_keys = __cpu_to_le32(TARGET_10X_NUM_PEER_KEYS);
+
+	config.bmiss_offload_max_vdev = __cpu_to_le32(ar->bmiss_offload_max_vdev);
+
+	if (test_bit(ATH10K_FW_FEATURE_WMI_10X_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+		u32 features = 0;
+
+		if (test_bit(ATH10K_FW_FEATURE_CT_STA,
+			     ar->running_fw->fw_file.fw_features) &&
+		    ar->request_ct_sta) {
+			config.rx_decap_mode = __cpu_to_le32(ATH10K_HW_TXRX_NATIVE_WIFI |
+							     ATH10k_VDEV_CT_STA_MODE);
+			ath10k_info(ar, "using CT-STA mode\n");
+		}
+		else if (test_bit(ATH10K_FW_FEATURE_CT_RXSWCRYPT,
+			     ar->running_fw->fw_file.fw_features) &&
+		    ar->request_nohwcrypt) {
+			/* This will disable rx decryption in hardware, enable raw
+			 * rx mode, and native-wifi tx mode.  Requires 'CT' firmware.
+			 */
+			config.rx_decap_mode = __cpu_to_le32(ATH10K_HW_TXRX_RAW |
+							     ATH10k_USE_SW_RX_CRYPT);
+			ar->use_swcrypt = true;
+			ath10k_info(ar, "using rx swcrypt\n");
+		}
+		else if (ar->request_nohwcrypt) {
+			ath10k_err(ar, "nohwcrypt requested, but firmware does not support this feature.  Disabling swcrypt.\n");
+		}
+		config.rx_decap_mode |= __cpu_to_le32(ATH10k_USE_TXCOMPL_TXRATE | ATH10k_MGT_CHAIN_RSSI_OK
+						      | ATH10k_VDEV_CT_STATS_OK);
+
+		if (test_bit(ATH10K_FW_FEATURE_TXRATE2_CT,
+			     ar->running_fw->fw_file.fw_features))
+			config.rx_decap_mode |= __cpu_to_le32(ATH10k_USE_TXCOMPL_TXRATE2);
+
+		/* Disable WoW in firmware, could make this module option perhaps? */
+		config.rx_decap_mode |= __cpu_to_le32(ATH10k_DISABLE_WOW);
+		config.roam_offload_max_vdev = 0; /* disable roaming */
+		config.roam_offload_max_ap_profiles = 0; /* disable roaming */
+
+		config.num_peer_keys = __cpu_to_le32(TARGET_10X_NUM_PEER_KEYS_CT);
+
+		if (ar->num_ratectrl_objs) {
+			ath10k_info(ar, "using %d firmware rate-ctrl objects\n",
+				    ar->num_ratectrl_objs);
+			config.tx_chain_mask |= __cpu_to_le32(ar->num_ratectrl_objs << 24);
+		}
+
+		if (test_bit(ATH10K_FLAG_BTCOEX, &ar->dev_flags) &&
+		    test_bit(WMI_SERVICE_COEX_GPIO, ar->wmi.svc_map))
+			features |= WMI_10_2_COEX_GPIO;
+
+		if (ath10k_peer_stats_enabled(ar))
+			features |= WMI_10_2_PEER_STATS;
+
+		if (test_bit(WMI_SERVICE_BSS_CHANNEL_INFO_64, ar->wmi.svc_map))
+			features |= WMI_10_2_BSS_CHAN_INFO;
+
+		config.rx_decap_mode |= __cpu_to_le32(features << 24);
+	}
+	config.num_msdu_desc = __cpu_to_le32(ar->htt.max_num_pending_tx);
+	config.ast_skid_limit = __cpu_to_le32(ar->skid_limit);
+
+	/* Firmware will crash if this is not even multiple of 8 */
+	if (WARN_ON(ar->htt.max_num_pending_tx & 0x7)) {
+		ath10k_err(ar, "tx-descriptors must be multiple of 8: %d\n",
+			   ar->htt.max_num_pending_tx);
+	}
+
+	config.num_tids = __cpu_to_le32(ar->num_tids);
+	config.rx_chain_mask = __cpu_to_le32(TARGET_10X_RX_CHAIN_MASK);
+	config.rx_timeout_pri_vo = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
+	config.rx_timeout_pri_vi = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
+	config.rx_timeout_pri_be = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
+	config.rx_timeout_pri_bk = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_HI_PRI);
+	config.scan_max_pending_reqs =
+		__cpu_to_le32(TARGET_10X_SCAN_MAX_PENDING_REQS);
 
 	config.num_mcast_groups = __cpu_to_le32(TARGET_10X_NUM_MCAST_GROUPS);
 	config.num_mcast_table_elems =
@@ -6366,7 +7109,6 @@ static struct sk_buff *ath10k_wmi_10_1_op_gen_init(struct ath10k *ar)
 
 	config.vow_config = __cpu_to_le32(TARGET_10X_VOW_CONFIG);
 
-	config.num_msdu_desc = __cpu_to_le32(TARGET_10X_NUM_MSDU_DESC);
 	config.max_frag_entries = __cpu_to_le32(TARGET_10X_MAX_FRAG_ENTRIES);
 
 	len = sizeof(*cmd) +
@@ -6392,37 +7134,80 @@ static struct sk_buff *ath10k_wmi_10_2_op_gen_init(struct ath10k *ar)
 	struct wmi_resource_config_10x config = {};
 	u32 len, val, features;
 
-	config.num_vdevs = __cpu_to_le32(TARGET_10X_NUM_VDEVS);
-	config.num_peer_keys = __cpu_to_le32(TARGET_10X_NUM_PEER_KEYS);
-
-	if (ath10k_peer_stats_enabled(ar)) {
-		config.num_peers = __cpu_to_le32(TARGET_10X_TX_STATS_NUM_PEERS);
-		config.num_tids = __cpu_to_le32(TARGET_10X_TX_STATS_NUM_TIDS);
-	} else {
-		config.num_peers = __cpu_to_le32(TARGET_10X_NUM_PEERS);
-		config.num_tids = __cpu_to_le32(TARGET_10X_NUM_TIDS);
-	}
-
-	config.ast_skid_limit = __cpu_to_le32(TARGET_10X_AST_SKID_LIMIT);
-	config.tx_chain_mask = __cpu_to_le32(TARGET_10X_TX_CHAIN_MASK);
-	config.rx_chain_mask = __cpu_to_le32(TARGET_10X_RX_CHAIN_MASK);
-	config.rx_timeout_pri_vo = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
-	config.rx_timeout_pri_vi = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
-	config.rx_timeout_pri_be = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
-	config.rx_timeout_pri_bk = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_HI_PRI);
 	config.rx_decap_mode = __cpu_to_le32(ar->wmi.rx_decap_mode);
 
-	config.scan_max_pending_reqs =
-		__cpu_to_le32(TARGET_10X_SCAN_MAX_PENDING_REQS);
-
-	config.bmiss_offload_max_vdev =
-		__cpu_to_le32(TARGET_10X_BMISS_OFFLOAD_MAX_VDEV);
+	config.num_vdevs = __cpu_to_le32(ar->max_num_vdevs);
+	config.num_peers = __cpu_to_le32(ar->max_num_peers);
+	config.tx_chain_mask = __cpu_to_le32(TARGET_10X_TX_CHAIN_MASK);
 
 	config.roam_offload_max_vdev =
 		__cpu_to_le32(TARGET_10X_ROAM_OFFLOAD_MAX_VDEV);
 
 	config.roam_offload_max_ap_profiles =
 		__cpu_to_le32(TARGET_10X_ROAM_OFFLOAD_MAX_AP_PROFILES);
+	config.num_peer_keys = __cpu_to_le32(TARGET_10X_NUM_PEER_KEYS);
+	config.bmiss_offload_max_vdev = __cpu_to_le32(ar->bmiss_offload_max_vdev);
+
+	if (ath10k_peer_stats_enabled(ar)) {
+		config.num_peers = __cpu_to_le32(TARGET_10X_TX_STATS_NUM_PEERS);
+	} else {
+		config.num_peers = __cpu_to_le32(TARGET_10X_NUM_PEERS);
+	}
+	config.num_tids = __cpu_to_le32(ar->num_tids);
+
+	config.tx_chain_mask = __cpu_to_le32(TARGET_10X_TX_CHAIN_MASK);
+
+	if (test_bit(ATH10K_FW_FEATURE_WMI_10X_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+		if (test_bit(ATH10K_FW_FEATURE_CT_RXSWCRYPT,
+			     ar->running_fw->fw_file.fw_features) &&
+		    ar->request_nohwcrypt) {
+			/* This will disable rx decryption in hardware, enable raw
+			 * rx mode, and native-wifi tx mode.  Requires 'CT' firmware.
+			 */
+			config.rx_decap_mode = __cpu_to_le32(ATH10K_HW_TXRX_RAW |
+							     ATH10k_USE_SW_RX_CRYPT);
+			ar->use_swcrypt = true;
+			ath10k_info(ar, "using rx swcrypt\n");
+		}
+		else if (ar->request_nohwcrypt) {
+			ath10k_err(ar, "module param nohwcrypt enabled, but firmware does not support this feature.  Disabling swcrypt.\n");
+		}
+
+		if (test_bit(ATH10K_FW_FEATURE_TXRATE_CT,
+			     ar->running_fw->fw_file.fw_features))
+			config.rx_decap_mode |= __cpu_to_le32(ATH10k_USE_TXCOMPL_TXRATE | ATH10k_MGT_CHAIN_RSSI_OK);
+
+		/* Disable WoW in firmware, could make this module option perhaps? */
+		config.rx_decap_mode |= __cpu_to_le32(ATH10k_DISABLE_WOW);
+
+		config.roam_offload_max_vdev = 0; /* disable roaming */
+		config.roam_offload_max_ap_profiles = 0; /* disable roaming */
+		config.num_peer_keys = __cpu_to_le32(TARGET_10X_NUM_PEER_KEYS_CT);
+
+		if (ar->num_ratectrl_objs) {
+			ath10k_info(ar, "using %d firmware rate-ctrl objects\n",
+				    ar->num_ratectrl_objs);
+			config.tx_chain_mask |= __cpu_to_le32(ar->num_ratectrl_objs << 24);
+		}
+	}
+	config.num_msdu_desc = __cpu_to_le32(ar->htt.max_num_pending_tx);
+	config.ast_skid_limit = __cpu_to_le32(ar->skid_limit);
+
+	/* Firmware will crash if this is not even multiple of 8 */
+	if (WARN_ON(ar->htt.max_num_pending_tx & 0x7)) {
+		ath10k_err(ar, "tx-descriptors must be multiple of 8: %d\n",
+			   ar->htt.max_num_pending_tx);
+	}
+
+	config.rx_chain_mask = __cpu_to_le32(TARGET_10X_RX_CHAIN_MASK);
+	config.rx_timeout_pri_vo = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
+	config.rx_timeout_pri_vi = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
+	config.rx_timeout_pri_be = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_LO_PRI);
+	config.rx_timeout_pri_bk = __cpu_to_le32(TARGET_10X_RX_TIMEOUT_HI_PRI);
+
+	config.scan_max_pending_reqs =
+		__cpu_to_le32(TARGET_10X_SCAN_MAX_PENDING_REQS);
 
 	config.num_mcast_groups = __cpu_to_le32(TARGET_10X_NUM_MCAST_GROUPS);
 	config.num_mcast_table_elems =
@@ -6439,7 +7224,6 @@ static struct sk_buff *ath10k_wmi_10_2_op_gen_init(struct ath10k *ar)
 
 	config.vow_config = __cpu_to_le32(TARGET_10X_VOW_CONFIG);
 
-	config.num_msdu_desc = __cpu_to_le32(TARGET_10X_NUM_MSDU_DESC);
 	config.max_frag_entries = __cpu_to_le32(TARGET_10X_MAX_FRAG_ENTRIES);
 
 	len = sizeof(*cmd) +
@@ -6479,32 +7263,103 @@ static struct sk_buff *ath10k_wmi_10_4_op_gen_init(struct ath10k *ar)
 	struct wmi_resource_config_10_4 config = {};
 	u32 len;
 
+	config.rx_decap_mode = __cpu_to_le32(ar->wmi.rx_decap_mode);
+
 	config.num_vdevs = __cpu_to_le32(ar->max_num_vdevs);
 	config.num_peers = __cpu_to_le32(ar->max_num_peers);
+	ath10k_warn(ar, "10.4 wmi init: vdevs: %d  peers: %d  tid: %d\n",
+		    ar->max_num_vdevs, ar->max_num_peers, ar->num_tids);
+
+	config.tx_chain_mask  = __cpu_to_le32(ar->hw_params.tx_chain_mask);
+	config.rx_chain_mask  = __cpu_to_le32(ar->hw_params.rx_chain_mask);
+
+	config.roam_offload_max_vdev  =
+			__cpu_to_le32(TARGET_10_4_ROAM_OFFLOAD_MAX_VDEV);
+
+	config.roam_offload_max_ap_profiles =
+			__cpu_to_le32(TARGET_10_4_ROAM_OFFLOAD_MAX_PROFILES);
+	config.num_peer_keys  = __cpu_to_le32(TARGET_10_4_NUM_PEER_KEYS);
+	config.bmiss_offload_max_vdev = __cpu_to_le32(ar->bmiss_offload_max_vdev);
+	config.qwrap_config = __cpu_to_le32(TARGET_10_4_QWRAP_CONFIG);
+
+	if (test_bit(ATH10K_FW_FEATURE_WMI_10X_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+#if 0
+		/* Enabling this kills performance, for whatever reason. */
+		skid_limit = TARGET_10X_AST_SKID_LIMIT_CT;
+#endif
+		if (test_bit(ATH10K_FW_FEATURE_CT_STA,
+			     ar->running_fw->fw_file.fw_features) &&
+		    ar->request_ct_sta) {
+			/* TODO-BEN:  Should this be NATIVE_WIFI mode, like we do for 10.1? */
+			config.rx_decap_mode = __cpu_to_le32(ATH10K_HW_TXRX_RAW |
+							     ATH10k_VDEV_CT_STA_MODE);
+			ath10k_info(ar, "using CT-STA mode\n");
+		}
+		else if (test_bit(ATH10K_FW_FEATURE_CT_RXSWCRYPT,
+				  ar->running_fw->fw_file.fw_features) &&
+			 ar->request_nohwcrypt) {
+			/* This will disable rx decryption in hardware, enable raw
+			 * rx mode, and native-wifi tx mode.  Requires 'CT' firmware.
+			 */
+			config.rx_decap_mode = __cpu_to_le32(ATH10K_HW_TXRX_RAW |
+							     ATH10k_USE_SW_RX_CRYPT);
+			ar->use_swcrypt = true;
+			ath10k_info(ar, "using rx swcrypt\n");
+		}
+		else if (ar->request_nohwcrypt) {
+			ath10k_err(ar, "nohwcrypt requested, but firmware does not support this feature.  Disabling swcrypt.\n");
+		}
+
+		if (test_bit(ATH10K_FW_FEATURE_TXRATE_CT,
+			     ar->running_fw->fw_file.fw_features)) {
+			config.rx_decap_mode |= __cpu_to_le32(ATH10k_USE_TXCOMPL_TXRATE | ATH10k_MGT_CHAIN_RSSI_OK);
+			/* Must enable alloc_frag_desc_for_data_pkt for txrate support.  This eats up
+			 * 4 extra bytes per msdu descriptor.
+			 */
+			config.qwrap_config = __cpu_to_le32(1 << 16 | TARGET_10_4_QWRAP_CONFIG);
+		}
+
+		if (test_bit(ATH10K_FW_FEATURE_TXRATE2_CT,
+			     ar->running_fw->fw_file.fw_features))
+			config.rx_decap_mode |= __cpu_to_le32(ATH10k_USE_TXCOMPL_TXRATE2);
+
+		/* Disable WoW in firmware, could make this module option perhaps? */
+		config.rx_decap_mode |= __cpu_to_le32(ATH10k_DISABLE_WOW);
+
+		config.roam_offload_max_vdev = 0; /* disable roaming */
+		config.roam_offload_max_ap_profiles = 0; /* disable roaming */
+		/* 3 per peer is likely enough, but technically, there is room for 4
+		 * The default is 2 per peer, but that is not enough when testing
+		 * lots of station vdevs with encryption since each 'real' peer can
+		 * have 4 keys, and the self-peer has one key.
+		 */
+		config.num_peer_keys = __cpu_to_le32(3);
+
+		if (ar->num_ratectrl_objs) {
+			ath10k_info(ar, "using %d firmware rate-ctrl objects\n",
+				    ar->num_ratectrl_objs);
+			config.tx_chain_mask |= __cpu_to_le32(ar->num_ratectrl_objs << 24);
+		}
+	}
+	config.num_msdu_desc = __cpu_to_le32(ar->htt.max_num_pending_tx);
+	ath10k_warn(ar, "msdu-desc: %d  skid: %d\n",
+		    ar->htt.max_num_pending_tx, ar->skid_limit);
+	config.ast_skid_limit = __cpu_to_le32(ar->skid_limit);
+
 	config.num_active_peers = __cpu_to_le32(ar->num_active_peers);
 	config.num_tids = __cpu_to_le32(ar->num_tids);
 
 	config.num_offload_peers = __cpu_to_le32(TARGET_10_4_NUM_OFFLOAD_PEERS);
 	config.num_offload_reorder_buffs =
 			__cpu_to_le32(TARGET_10_4_NUM_OFFLOAD_REORDER_BUFFS);
-	config.num_peer_keys  = __cpu_to_le32(TARGET_10_4_NUM_PEER_KEYS);
-	config.ast_skid_limit = __cpu_to_le32(TARGET_10_4_AST_SKID_LIMIT);
-	config.tx_chain_mask  = __cpu_to_le32(ar->hw_params.tx_chain_mask);
-	config.rx_chain_mask  = __cpu_to_le32(ar->hw_params.rx_chain_mask);
 
 	config.rx_timeout_pri[0] = __cpu_to_le32(TARGET_10_4_RX_TIMEOUT_LO_PRI);
 	config.rx_timeout_pri[1] = __cpu_to_le32(TARGET_10_4_RX_TIMEOUT_LO_PRI);
 	config.rx_timeout_pri[2] = __cpu_to_le32(TARGET_10_4_RX_TIMEOUT_LO_PRI);
 	config.rx_timeout_pri[3] = __cpu_to_le32(TARGET_10_4_RX_TIMEOUT_HI_PRI);
 
-	config.rx_decap_mode	    = __cpu_to_le32(ar->wmi.rx_decap_mode);
 	config.scan_max_pending_req = __cpu_to_le32(TARGET_10_4_SCAN_MAX_REQS);
-	config.bmiss_offload_max_vdev =
-			__cpu_to_le32(TARGET_10_4_BMISS_OFFLOAD_MAX_VDEV);
-	config.roam_offload_max_vdev  =
-			__cpu_to_le32(TARGET_10_4_ROAM_OFFLOAD_MAX_VDEV);
-	config.roam_offload_max_ap_profiles =
-			__cpu_to_le32(TARGET_10_4_ROAM_OFFLOAD_MAX_PROFILES);
 	config.num_mcast_groups = __cpu_to_le32(TARGET_10_4_NUM_MCAST_GROUPS);
 	config.num_mcast_table_elems =
 			__cpu_to_le32(TARGET_10_4_NUM_MCAST_TABLE_ELEMS);
@@ -6521,7 +7376,6 @@ static struct sk_buff *ath10k_wmi_10_4_op_gen_init(struct ath10k *ar)
 	config.vow_config = __cpu_to_le32(TARGET_10_4_VOW_CONFIG);
 	config.gtk_offload_max_vdev =
 			__cpu_to_le32(TARGET_10_4_GTK_OFFLOAD_MAX_VDEV);
-	config.num_msdu_desc = __cpu_to_le32(ar->htt.max_num_pending_tx);
 	config.max_frag_entries = __cpu_to_le32(TARGET_10_4_11AC_TX_MAX_FRAGS);
 	config.max_peer_ext_stats =
 			__cpu_to_le32(TARGET_10_4_MAX_PEER_EXT_STATS);
@@ -6537,7 +7391,6 @@ static struct sk_buff *ath10k_wmi_10_4_op_gen_init(struct ath10k *ar)
 			__cpu_to_le32(TARGET_10_4_THERMAL_THROTTLING_CONFIG);
 	config.atf_config = __cpu_to_le32(TARGET_10_4_ATF_CONFIG);
 	config.iphdr_pad_config = __cpu_to_le32(TARGET_10_4_IPHDR_PAD_CONFIG);
-	config.qwrap_config = __cpu_to_le32(TARGET_10_4_QWRAP_CONFIG);
 
 	len = sizeof(*cmd) +
 	      (sizeof(struct host_memory_chunk) * ar->wmi.num_mem_chunks);
@@ -6894,16 +7747,55 @@ ath10k_wmi_op_gen_vdev_start(struct ath10k *ar,
 		memcpy(cmd->ssid.ssid, arg->ssid, arg->ssid_len);
 	}
 
-	ath10k_wmi_put_wmi_channel(&cmd->chan, &arg->channel);
+	ath10k_wmi_put_wmi_channel(ar, &cmd->chan, &arg->channel, arg->vdev_id);
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI,
-		   "wmi vdev %s id 0x%x flags: 0x%0X, freq %d, mode %d, ch_flags: 0x%0X, max_power: %d\n",
+		   "wmi vdev %s id 0x%x flags: 0x%0X, freq %d, mode %d, ch_flags: 0x%0X, max_power: %d bcn-intval: %d\n",
 		   cmdname, arg->vdev_id,
 		   flags, arg->channel.freq, arg->channel.mode,
-		   cmd->chan.flags, arg->channel.max_power);
+		   cmd->chan.flags, arg->channel.max_power, arg->bcn_intval);
 
 	return skb;
 }
+
+#ifdef CONFIG_ATH10K_DEBUGFS
+/* TODO:  Should really enable this all the time, not just when DEBUGFS is enabled. --Ben */
+/* CT firmware only:
+ * (re) start wmi keep-alive timer in firmware.  Once we start
+ * sending these, firmware will assert if it does not receive one
+ * after about 10 seconds.
+ */
+
+struct wmi_request_nop_cmd {
+	u32 nop_id; /* for debugging purposes */
+};
+
+int ath10k_wmi_request_nop(struct ath10k *ar)
+{
+	struct wmi_request_nop_cmd *cmd;
+	struct sk_buff *skb;
+
+	if (! test_bit(ATH10K_FW_FEATURE_NOP_CT,
+		       ar->running_fw->fw_file.fw_features))
+		return 0;
+
+	skb = ath10k_wmi_alloc_skb(ar, sizeof(*cmd));
+	if (!skb)
+		return -ENOMEM;
+
+	cmd = (struct wmi_request_nop_cmd *)skb->data;
+	cmd->nop_id = __cpu_to_le32(ar->debug.nop_id++);
+
+	/* This is fairly verbose in the logs when WMI debugging is enabled,
+	 * so only print this out every 100 times. --Ben
+	 */
+	if ((ar->debug.nop_id % 100) == 0)
+		ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi request nop (id %d)\n",
+			   ar->debug.nop_id - 1);
+
+	return ath10k_wmi_cmd_send(ar, skb, WMI_NOP);
+}
+#endif
 
 static struct sk_buff *
 ath10k_wmi_op_gen_vdev_stop(struct ath10k *ar, u32 vdev_id)
@@ -7022,8 +7914,9 @@ ath10k_wmi_op_gen_vdev_install_key(struct ath10k *ar,
 		memcpy(cmd->key_data, arg->key_data, arg->key_len);
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI,
-		   "wmi vdev install key idx %d cipher %d len %d\n",
-		   arg->key_idx, arg->key_cipher, arg->key_len);
+		   "wmi vdev %d install key peer %pM idx %d cipher %d len %d flags 0x%x\n",
+		   arg->vdev_id, arg->macaddr, arg->key_idx, arg->key_cipher, arg->key_len,
+		   arg->key_flags);
 	return skb;
 }
 
@@ -7118,6 +8011,12 @@ ath10k_wmi_op_gen_peer_delete(struct ath10k *ar, u32 vdev_id,
 	cmd = (struct wmi_peer_delete_cmd *)skb->data;
 	cmd->vdev_id = __cpu_to_le32(vdev_id);
 	ether_addr_copy(cmd->peer_macaddr.addr, peer_addr);
+
+	/* Steal a high bit.  Stock firmware should ignore it,
+	 * CT 10.1 (at least) firmware built after Nov 29 will
+	 * pay attention and flush if requested.
+	 */
+	cmd->peer_macaddr.word1 |= __cpu_to_le32(0x80000000);
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI,
 		   "wmi peer delete vdev_id %d peer_addr %pM\n",
@@ -7266,7 +8165,7 @@ ath10k_wmi_op_gen_scan_chan_list(struct ath10k *ar,
 		ch = &arg->channels[i];
 		ci = &cmd->chan_info[i];
 
-		ath10k_wmi_put_wmi_channel(ci, ch);
+		ath10k_wmi_put_wmi_channel(ar, ci, ch, -1);
 	}
 
 	return skb;
@@ -7277,8 +8176,51 @@ ath10k_wmi_peer_assoc_fill(struct ath10k *ar, void *buf,
 			   const struct wmi_peer_assoc_complete_arg *arg)
 {
 	struct wmi_common_peer_assoc_complete_cmd *cmd = buf;
+	u32 vid = arg->vdev_id;
+	u32 ext_flags = 0;
 
-	cmd->vdev_id            = __cpu_to_le32(arg->vdev_id);
+	if (test_bit(ATH10K_FW_FEATURE_CT_RATEMASK,
+		     ar->running_fw->fw_file.fw_features)) {
+		/* Add some CT firmware specific stuff */
+		vid |= (1<<31); /* ext field exists */
+		if (arg->has_rate_overrides) {
+			int i;
+			int opver = ar->running_fw->fw_file.wmi_op_version;
+			ext_flags |= PEER_ASSOC_EXT_USE_OVERRIDES;
+			ext_flags |= PEER_ASSOC_EXT_LEN_32;
+
+			ath10k_dbg(ar, ATH10K_DBG_WMI,
+				   "overrides: len %d\n", (int)(sizeof(arg->rate_overrides)));
+			for (i = 0; i<sizeof(arg->rate_overrides); i++) {
+				ath10k_dbg(ar, ATH10K_DBG_WMI, "[%i] 0x%x\n",
+					   i, arg->rate_overrides[i]);
+			}
+			if (opver == ATH10K_FW_WMI_OP_VERSION_10_4) {
+				struct wmi_10_4_peer_assoc_complete_cmd_ct *c = (void*)cmd;
+				memcpy(c->overrides.rate_overrides, arg->rate_overrides,
+				       sizeof(c->overrides.rate_overrides));
+				c->overrides.ext_flags = __cpu_to_le32(ext_flags);
+			}
+			else if ((opver == ATH10K_FW_WMI_OP_VERSION_10_2) ||
+				 (opver == ATH10K_FW_WMI_OP_VERSION_10_2_4)) {
+				struct wmi_10_2_peer_assoc_complete_cmd_ct *c = (void*)cmd;
+				memcpy(c->overrides.rate_overrides, arg->rate_overrides,
+				       sizeof(c->overrides.rate_overrides));
+				c->overrides.ext_flags = __cpu_to_le32(ext_flags);
+			}
+			else if (opver == ATH10K_FW_WMI_OP_VERSION_10_1) {
+				struct wmi_10_1_peer_assoc_complete_cmd_ct *c = (void*)cmd;
+				memcpy(c->overrides.rate_overrides, arg->rate_overrides,
+				       sizeof(c->overrides.rate_overrides));
+				c->overrides.ext_flags = __cpu_to_le32(ext_flags);
+			}
+			else {
+				WARN_ON_ONCE(1);
+			}
+		}
+	}
+
+	cmd->vdev_id            = __cpu_to_le32(vid);
 	cmd->peer_new_assoc     = __cpu_to_le32(arg->peer_reassoc ? 0 : 1);
 	cmd->peer_associd       = __cpu_to_le32(arg->peer_aid);
 	cmd->peer_flags         = __cpu_to_le32(arg->peer_flags);
@@ -7357,12 +8299,8 @@ ath10k_wmi_peer_assoc_fill_10_4(struct ath10k *ar, void *buf,
 	struct wmi_10_4_peer_assoc_complete_cmd *cmd = buf;
 
 	ath10k_wmi_peer_assoc_fill_10_2(ar, buf, arg);
-	if (arg->peer_bw_rxnss_override)
-		cmd->peer_bw_rxnss_override =
-			__cpu_to_le32((arg->peer_bw_rxnss_override - 1) |
-				      BIT(PEER_BW_RXNSS_OVERRIDE_OFFSET));
-	else
-		cmd->peer_bw_rxnss_override = 0;
+
+	cmd->peer_bw_rxnss_override = __cpu_to_le32(arg->peer_bw_rxnss_override);
 }
 
 static int
@@ -7407,7 +8345,7 @@ static struct sk_buff *
 ath10k_wmi_10_1_op_gen_peer_assoc(struct ath10k *ar,
 				  const struct wmi_peer_assoc_complete_arg *arg)
 {
-	size_t len = sizeof(struct wmi_10_1_peer_assoc_complete_cmd);
+	size_t len = sizeof(struct wmi_10_1_peer_assoc_complete_cmd_ct);
 	struct sk_buff *skb;
 	int ret;
 
@@ -7422,9 +8360,10 @@ ath10k_wmi_10_1_op_gen_peer_assoc(struct ath10k *ar,
 	ath10k_wmi_peer_assoc_fill_10_1(ar, skb->data, arg);
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI,
-		   "wmi peer assoc vdev %d addr %pM (%s)\n",
+		   "wmi peer assoc vdev %d addr %pM (%s) flags 0x%x\n",
 		   arg->vdev_id, arg->addr,
-		   arg->peer_reassoc ? "reassociate" : "new");
+		   arg->peer_reassoc ? "reassociate" : "new",
+		   arg->peer_flags);
 	return skb;
 }
 
@@ -7432,7 +8371,7 @@ static struct sk_buff *
 ath10k_wmi_10_2_op_gen_peer_assoc(struct ath10k *ar,
 				  const struct wmi_peer_assoc_complete_arg *arg)
 {
-	size_t len = sizeof(struct wmi_10_2_peer_assoc_complete_cmd);
+	size_t len = sizeof(struct wmi_10_2_peer_assoc_complete_cmd_ct);
 	struct sk_buff *skb;
 	int ret;
 
@@ -7457,7 +8396,7 @@ static struct sk_buff *
 ath10k_wmi_10_4_op_gen_peer_assoc(struct ath10k *ar,
 				  const struct wmi_peer_assoc_complete_arg *arg)
 {
-	size_t len = sizeof(struct wmi_10_4_peer_assoc_complete_cmd);
+	size_t len = sizeof(struct wmi_10_4_peer_assoc_complete_cmd_ct);
 	struct sk_buff *skb;
 	int ret;
 
@@ -7479,6 +8418,29 @@ ath10k_wmi_10_4_op_gen_peer_assoc(struct ath10k *ar,
 }
 
 static struct sk_buff *
+ath10k_wmi_10_1_op_gen_pdev_get_temperature(struct ath10k *ar)
+{
+	struct sk_buff *skb;
+
+	if (!test_bit(ATH10K_FW_FEATURE_HAS_GET_TEMP_CT,
+		      ar->running_fw->fw_file.fw_features)) {
+		return ERR_PTR(-ENOTSUPP);
+	}
+
+	skb = ath10k_wmi_alloc_skb(ar, 0);
+	if (!skb)
+		return ERR_PTR(-ENOMEM);
+
+	/* This can be fairly verbose in the logs when WMI debugging is enabled,
+	 * so only print this out every 100 times. --Ben
+	 */
+	if ((ar->wmi_get_temp_count++ % 100) == 0)
+		ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi pdev get temperature (count: %d)\n",
+			   ar->wmi_get_temp_count);
+	return skb;
+}
+
+static struct sk_buff *
 ath10k_wmi_10_2_op_gen_pdev_get_temperature(struct ath10k *ar)
 {
 	struct sk_buff *skb;
@@ -7487,7 +8449,12 @@ ath10k_wmi_10_2_op_gen_pdev_get_temperature(struct ath10k *ar)
 	if (!skb)
 		return ERR_PTR(-ENOMEM);
 
-	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi pdev get temperature\n");
+	/* This can be fairly verbose in the logs when WMI debugging is enabled,
+	 * so only print this out every 100 times. --Ben
+	 */
+	if ((ar->wmi_get_temp_count++ % 100) == 0)
+		ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi pdev get temperature (count: %d)\n",
+			   ar->wmi_get_temp_count);
 	return skb;
 }
 
@@ -7520,6 +8487,7 @@ ath10k_wmi_op_gen_beacon_dma(struct ath10k *ar, u32 vdev_id, const void *bcn,
 	struct wmi_bcn_tx_ref_cmd *cmd;
 	struct sk_buff *skb;
 	struct ieee80211_hdr *hdr;
+	u32 ppdu_info = 0;
 	u16 fc;
 
 	skb = ath10k_wmi_alloc_skb(ar, sizeof(*cmd));
@@ -7529,9 +8497,33 @@ ath10k_wmi_op_gen_beacon_dma(struct ath10k *ar, u32 vdev_id, const void *bcn,
 	hdr = (struct ieee80211_hdr *)bcn;
 	fc = le16_to_cpu(hdr->frame_control);
 
+	if (test_bit(ATH10K_FW_FEATURE_HAS_BCN_RC_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+#if 0
+		/* Left as an exercise to the user:  If you want to TX beacons at different
+		 * rates, power, etc.  Then adjust these variables below accordingly.
+		 * --Ben
+		 */
+		u8 tpc = 0xFF; /* ff means don't set */
+		u8 sgi = 0;
+		u8 mcs = 3; // 6Mbps (if ofdm)
+		u8 nss = 0;
+		u8 pream_type = 0; /* ofdm */
+		u8 num_retries = 0; /* no ack */
+		u8 dyn_bw = 0;
+		u8 bw = 0;
+
+		tpc = 1; /* BEN:  Not sure this currently has an effect. */
+		pream_type = 2; /* HT */
+		mcs = 4; /* 54Mbps, if ofdm, 39Mbps if HT, for test purposes */
+
+		ppdu_info = ath10k_convert_hw_rate_to_rate_info(tpc, mcs, sgi, nss, pream_type, num_retries, bw, dyn_bw);
+#endif
+	}
+
 	cmd = (struct wmi_bcn_tx_ref_cmd *)skb->data;
-	cmd->vdev_id = __cpu_to_le32(vdev_id);
-	cmd->data_len = __cpu_to_le32(bcn_len);
+	cmd->vdev_id = __cpu_to_le32(vdev_id | (ppdu_info << 8));
+	cmd->data_len = __cpu_to_le32(bcn_len | (ppdu_info & 0xFF000000));
 	cmd->data_ptr = __cpu_to_le32(bcn_paddr);
 	cmd->msdu_id = 0;
 	cmd->frame_control = __cpu_to_le32(fc);
@@ -7580,7 +8572,7 @@ ath10k_wmi_op_gen_pdev_set_wmm(struct ath10k *ar,
 }
 
 static struct sk_buff *
-ath10k_wmi_op_gen_request_stats(struct ath10k *ar, u32 stats_mask)
+ath10k_wmi_op_gen_request_stats(struct ath10k *ar, u32 stats_mask, u32 specifier)
 {
 	struct wmi_request_stats_cmd *cmd;
 	struct sk_buff *skb;
@@ -7591,6 +8583,7 @@ ath10k_wmi_op_gen_request_stats(struct ath10k *ar, u32 stats_mask)
 
 	cmd = (struct wmi_request_stats_cmd *)skb->data;
 	cmd->stats_id = __cpu_to_le32(stats_mask);
+	cmd->vdev_id = __cpu_to_le32(specifier);
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI, "wmi request stats 0x%08x\n",
 		   stats_mask);
@@ -8108,6 +9101,9 @@ ath10k_wmi_fw_vdev_stats_fill(const struct ath10k_fw_stats_vdev *vdev,
 				"beacon rssi history", i,
 				vdev->beacon_rssi_history[i]);
 
+	len += scnprintf(buf + len, buf_len - len, "%30s %llu\n",
+			"tsf64", vdev->tsf64);
+
 	len += scnprintf(buf + len, buf_len - len, "\n");
 	*length = len;
 }
@@ -8129,6 +9125,8 @@ ath10k_wmi_fw_peer_stats_fill(const struct ath10k_fw_stats_peer *peer,
 			"Peer RX rate", peer->peer_rx_rate);
 	len += scnprintf(buf + len, buf_len - len, "%30s %u\n",
 			"Peer RX duration", peer->rx_duration);
+	len += scnprintf(buf + len, buf_len - len, "%30s %llu\n",
+			 "Peer PN", peer->pn);
 
 	len += scnprintf(buf + len, buf_len - len, "\n");
 	*length = len;
@@ -8390,7 +9388,16 @@ void ath10k_wmi_10_4_op_fw_stats_fill(struct ath10k *ar,
 
 	ath10k_wmi_fw_pdev_rx_stats_fill(pdev, buf, &len);
 	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
+			"Num Rx Timeout errors", pdev->rx_timeout_errs);
+	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
 			"Num Rx Overflow errors", pdev->rx_ovfl_errs);
+
+	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
+			 "DRAM Free", pdev->dram_free);
+	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
+			 "IRAM Free", pdev->iram_free);
+	len += scnprintf(buf + len, buf_len - len, "%30s %10d\n",
+			 "SRAM Free", pdev->sram_free);
 
 	len += scnprintf(buf + len, buf_len - len, "\n");
 	len += scnprintf(buf + len, buf_len - len, "%30s (%zu)\n",
@@ -8649,7 +9656,7 @@ ath10k_wmi_10_4_gen_tdls_peer_update(struct ath10k *ar,
 
 	for (i = 0; i < cap->peer_chan_len; i++) {
 		chan = (struct wmi_channel *)&peer_cap->peer_chan_list[i];
-		ath10k_wmi_put_wmi_channel(chan, &chan_arg[i]);
+		ath10k_wmi_put_wmi_channel(ar, chan, &chan_arg[i], arg->vdev_id);
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_WMI,
@@ -8724,6 +9731,33 @@ ath10k_wmi_barrier(struct ath10k *ar)
 		return -ETIMEDOUT;
 
 	return 0;
+}
+
+int ath10k_wmi_pdev_set_special(struct ath10k *ar, u32 id, u32 val)
+{
+	struct wmi_pdev_set_special_cmd *cmd;
+	struct sk_buff *skb;
+
+	if (!test_bit(ATH10K_FW_FEATURE_SET_SPECIAL_CT,
+		      ar->running_fw->fw_file.fw_features)) {
+		ath10k_warn(ar, "Only CT firmware supports this method of setting thresh62_ext.\n");
+		return -ENOTSUPP;
+	}
+
+	skb = ath10k_wmi_alloc_skb(ar, sizeof(*cmd));
+	if (!skb)
+		return -ENOMEM;
+
+	cmd = (struct wmi_pdev_set_special_cmd *)skb->data;
+	memset(cmd, 0, sizeof(*cmd));
+
+	cmd->id = __cpu_to_le32(id);
+	cmd->val = __cpu_to_le32(val);
+
+	ath10k_dbg(ar, ATH10K_DBG_WMI,
+		   "wmi pdev set special id:%d val: %d\n",
+		   id, val);
+	return ath10k_wmi_cmd_send(ar, skb, WMI_PDEV_SET_SPECIAL_CMDID);
 }
 
 static const struct wmi_ops wmi_ops = {
@@ -8804,7 +9838,7 @@ static const struct wmi_ops wmi_10_1_ops = {
 	.gen_pdev_set_rd = ath10k_wmi_10x_op_gen_pdev_set_rd,
 	.gen_start_scan = ath10k_wmi_10x_op_gen_start_scan,
 	.gen_peer_assoc = ath10k_wmi_10_1_op_gen_peer_assoc,
-	/* .gen_pdev_get_temperature not implemented */
+	.gen_pdev_get_temperature = ath10k_wmi_10_1_op_gen_pdev_get_temperature,
 
 	/* shared with main branch */
 	.pull_scan = ath10k_wmi_op_pull_scan_ev,
@@ -8862,7 +9896,14 @@ static const struct wmi_ops wmi_10_1_ops = {
 	/* .gen_prb_tmpl not implemented */
 	/* .gen_p2p_go_bcn_ie not implemented */
 	/* .gen_adaptive_qcs not implemented */
-	/* .gen_pdev_enable_adaptive_cca not implemented */
+
+	/* Some CT 10.1 firmware supports this.  Non-CT 10.1 firmware will not
+	 * advertise WMI_SERVICE_BSS_CHANNEL_INFO_64, so it will never be called
+	 * in the first place.
+	 */
+	.gen_pdev_bss_chan_info_req = ath10k_wmi_10_2_op_gen_pdev_bss_chan_info,
+	.gen_pdev_get_tpc_config = ath10k_wmi_10_2_4_op_gen_pdev_get_tpc_config,
+	.gen_pdev_enable_adaptive_cca = ath10k_wmi_op_gen_pdev_enable_adaptive_cca, /* CT only for wave-1 */
 };
 
 static const struct wmi_ops wmi_10_2_ops = {
@@ -9009,6 +10050,7 @@ static const struct wmi_ops wmi_10_4_ops = {
 	.rx = ath10k_wmi_10_4_op_rx,
 	.map_svc = wmi_10_4_svc_map,
 
+	.gen_peer_assoc = ath10k_wmi_10_4_op_gen_peer_assoc,
 	.pull_fw_stats = ath10k_wmi_10_4_op_pull_fw_stats,
 	.pull_scan = ath10k_wmi_op_pull_scan_ev,
 	.pull_mgmt_rx = ath10k_wmi_10_4_op_pull_mgmt_rx_ev,
@@ -9028,6 +10070,7 @@ static const struct wmi_ops wmi_10_4_ops = {
 	.gen_pdev_resume = ath10k_wmi_op_gen_pdev_resume,
 	.gen_pdev_set_rd = ath10k_wmi_10x_op_gen_pdev_set_rd,
 	.gen_pdev_set_param = ath10k_wmi_op_gen_pdev_set_param,
+	.gen_pdev_set_fwtest = ath10k_wmi_op_gen_pdev_set_fwtest,
 	.gen_init = ath10k_wmi_10_4_op_gen_init,
 	.gen_start_scan = ath10k_wmi_op_gen_start_scan,
 	.gen_stop_scan = ath10k_wmi_op_gen_stop_scan,
@@ -9045,7 +10088,6 @@ static const struct wmi_ops wmi_10_4_ops = {
 	.gen_peer_delete = ath10k_wmi_op_gen_peer_delete,
 	.gen_peer_flush = ath10k_wmi_op_gen_peer_flush,
 	.gen_peer_set_param = ath10k_wmi_op_gen_peer_set_param,
-	.gen_peer_assoc = ath10k_wmi_10_4_op_gen_peer_assoc,
 	.gen_set_psmode = ath10k_wmi_op_gen_set_psmode,
 	.gen_set_sta_ps = ath10k_wmi_op_gen_set_sta_ps,
 	.gen_set_ap_ps = ath10k_wmi_op_gen_set_ap_ps,

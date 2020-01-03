@@ -51,6 +51,107 @@ out:
 	spin_unlock_bh(&ar->data_lock);
 }
 
+static u8 cck_rateidx[] = {
+	3, 2 , 1, 0
+};
+#define cck_rateidx_size (ARRAY_SIZE(cck_rateidx))
+
+static u8 ofdm_rateidx[] = {
+	10, 8 , 6, 4, 11, 9, 7, 5
+};
+#define ofdm_rateidx_size (ARRAY_SIZE(ofdm_rateidx))
+
+static void ath10k_set_tx_rate_status(struct ath10k *ar,
+				      struct ieee80211_tx_rate *rate,
+				      const struct htt_tx_done *tx_done)
+{
+	struct ieee80211_channel *ch = ar->scan_channel;
+	u8 nss = (tx_done->tx_rate_code >> 4) & 0x3;
+	u8 hw_rate = tx_done->tx_rate_code & 0xF;
+
+	if (!ch)
+		ch = ar->rx_channel;
+
+	if (tx_done->mpdus_failed) {
+		if (tx_done->status == HTT_TX_COMPL_STATE_ACK) {
+			/* We failed some, but then succeeded (+1) */
+			rate->count = tx_done->mpdus_failed + 1;
+		}
+		else {
+			/* We failed all of them */
+			rate->count = tx_done->mpdus_failed;
+		}
+	}
+	else {
+		rate->count = 1;
+	}
+	rate->idx = -1; /* Will set it properly below if rate-code is sane. */
+
+	/* NOTE:  We see reports of '24Mbps 40Mhz' tx rates often reported when we force
+	 * OFDM (24Mbps, etc) legacy tx rate when station is configured for (V)HT 40 on channel
+	 * 11.  One possibility is that the rate-flags are not reported correctly,
+	 * but also maybe it is a real issue on the air somehow?  Evidently, it is
+	 * possible to transmit an OFDM frame at 40Mhz when RTS/CTS is being used.
+	 */
+
+	switch ((tx_done->tx_rate_code >> 6) & 0x3) {
+	case WMI_RATE_PREAMBLE_CCK:
+		if (likely(hw_rate < cck_rateidx_size))
+			rate->idx = cck_rateidx[hw_rate];
+		else
+			rate->idx = cck_rateidx[0];
+		break;
+
+        case WMI_RATE_PREAMBLE_OFDM:
+		if (likely(hw_rate < ofdm_rateidx_size))
+			rate->idx = ofdm_rateidx[hw_rate];
+		else
+			rate->idx = ofdm_rateidx[4];
+
+		/* If we are on 5Ghz, then idx must be decreased by
+		 * 4 since the CCK rates are not available on 5Ghz.
+		 */
+		if (ch && (ch->band == NL80211_BAND_5GHZ))
+			rate->idx -= 4;
+		break;
+	}/* switch OFDM/CCK */
+
+	if ((tx_done->tx_rate_code & 0xcc) == 0x44)
+		rate->flags |= IEEE80211_TX_RC_USE_SHORT_PREAMBLE;
+
+	if ((tx_done->tx_rate_code & 0xc0) == 0x80) {
+		rate->flags |= IEEE80211_TX_RC_MCS;
+		rate->idx = hw_rate + (nss * 8);
+	}
+
+	if ((tx_done->tx_rate_code & 0xc0) == 0xc0) {
+		rate->flags |= IEEE80211_TX_RC_VHT_MCS;
+		/* TODO-BEN:  Not sure this is correct. */
+		rate->idx = (nss << 4) | hw_rate;
+	}
+
+	if (tx_done->tx_rate_flags & ATH10K_RC_FLAG_40MHZ)
+		rate->flags |= IEEE80211_TX_RC_40_MHZ_WIDTH;
+	if (tx_done->tx_rate_flags & ATH10K_RC_FLAG_80MHZ)
+		rate->flags |= IEEE80211_TX_RC_80_MHZ_WIDTH;
+	if (tx_done->tx_rate_flags & ATH10K_RC_FLAG_160MHZ)
+		rate->flags |= IEEE80211_TX_RC_160_MHZ_WIDTH;
+	if (tx_done->tx_rate_flags & ATH10K_RC_FLAG_SGI)
+		rate->flags |= IEEE80211_TX_RC_SHORT_GI;
+}
+
+#if 0
+static const char* tx_done_state_str(int i) {
+	switch (i) {
+	case HTT_TX_COMPL_STATE_NONE: return "NONE";
+	case HTT_TX_COMPL_STATE_ACK: return "ACK";
+	case HTT_TX_COMPL_STATE_NOACK: return "NOACK";
+	case HTT_TX_COMPL_STATE_DISCARD: return "DISCARD";
+	default: return "UNKNOWN";
+	}
+}
+#endif
+
 int ath10k_txrx_tx_unref(struct ath10k_htt *htt,
 			 const struct htt_tx_done *tx_done)
 {
@@ -61,6 +162,7 @@ int ath10k_txrx_tx_unref(struct ath10k_htt *htt,
 	struct ath10k_skb_cb *skb_cb;
 	struct ath10k_txq *artxq;
 	struct sk_buff *msdu;
+	bool tx_failed = false;
 
 	ath10k_dbg(ar, ATH10K_DBG_HTT,
 		   "htt tx completion msdu_id %u status %d\n",
@@ -80,6 +182,17 @@ int ath10k_txrx_tx_unref(struct ath10k_htt *htt,
 		spin_unlock_bh(&htt->tx_lock);
 		return -ENOENT;
 	}
+
+	/*ath10k_warn(ar,
+		    "tx_unref, msdu_id: %d len: %d  tx-rate-code: 0x%x tx-rate-flags: 0x%x  tried: %d  failed: %d ack-rssi: %d status: %d (%s)\n",
+		    tx_done->msdu_id,
+		    msdu->len,
+		    tx_done->tx_rate_code,
+		    tx_done->tx_rate_flags,
+		    tx_done->mpdus_tried,
+		    tx_done->mpdus_failed,
+		    tx_done->ack_rssi,
+		    tx_done->status, tx_done_state_str(tx_done->status));*/
 
 	skb_cb = ATH10K_SKB_CB(msdu);
 	txq = skb_cb->txq;
@@ -103,11 +216,22 @@ int ath10k_txrx_tx_unref(struct ath10k_htt *htt,
 	memset(&info->status, 0, sizeof(info->status));
 	trace_ath10k_txrx_tx_unref(ar, tx_done->msdu_id);
 
+	if (tx_done->status == HTT_TX_COMPL_STATE_DISCARD) {
+#ifdef CONFIG_ATH10K_DEBUG
+		ar->debug.tx_discard++;
+		ar->debug.tx_discard_bytes += msdu->len;
+#endif
+		ieee80211_free_txskb(htt->ar->hw, msdu);
+		return 0;
+	}
+
+	info->status.ack_signal = tx_done->ack_rssi;
+
 	if (!(info->flags & IEEE80211_TX_CTL_NO_ACK))
 		info->flags |= IEEE80211_TX_STAT_ACK;
 
 	if (tx_done->status == HTT_TX_COMPL_STATE_NOACK)
-		info->flags &= ~IEEE80211_TX_STAT_ACK;
+		tx_failed = true;
 
 	if ((tx_done->status == HTT_TX_COMPL_STATE_ACK) &&
 	    (info->flags & IEEE80211_TX_CTL_NO_ACK))
@@ -126,6 +250,58 @@ int ath10k_txrx_tx_unref(struct ath10k_htt *htt,
 						tx_done->ack_rssi;
 		info->status.is_valid_ack_signal = true;
 	}
+
+	if (tx_done->tx_rate_code || tx_done->tx_rate_flags || ar->ok_tx_rate_status) {
+		/* rate-code for 48Mbps is 0, with no flags, so we need to remember
+		 * any other valid rates we might have seen and use that to know if
+		 * firmware is sending tx rates.
+		 */
+
+		/* We have a better check for this in wave-1 firmware now */
+		if ((!tx_done->mpdus_tried) && (!tx_done->tx_rate_code) && (!tx_done->tx_rate_flags)) {
+			if (likely(test_bit(ATH10K_FW_FEATURE_TXRATE2_CT,
+					    ar->running_fw->fw_file.fw_features))) {
+				/* This firmware does not report rates for other than the first frame of
+				 * an ampdu chain, so this check allows us to skip those (which previously
+				 * resulting in a rate of 48Mbps reported.
+				 */
+				goto skip_reporting;
+			}
+		}
+
+		ar->ok_tx_rate_status = true;
+		ath10k_set_tx_rate_status(ar, &info->status.rates[0], tx_done);
+
+		/* Only in version 14 and higher of CT firmware */
+		if (test_bit(ATH10K_FW_FEATURE_HAS_TXSTATUS_NOACK,
+			     ar->running_fw->fw_file.fw_features)) {
+			/* Deal with tx-completion status */
+			if ((tx_done->tx_rate_flags & 0x3) == ATH10K_RC_FLAG_XRETRY) {
+#ifdef CONFIG_ATH10K_DEBUG
+				ar->debug.tx_noack++;
+				ar->debug.tx_noack_bytes += msdu->len;
+#endif
+				tx_failed = true;
+			}
+			/* TODO:  Report drops differently. */
+			if ((tx_done->tx_rate_flags & 0x3) == ATH10K_RC_FLAG_DROP)
+				tx_failed = true;
+		}
+	} else {
+	skip_reporting:
+		info->status.rates[0].idx = -1;
+	}
+
+
+	if (tx_failed) {
+		info->flags &= ~IEEE80211_TX_STAT_ACK;
+	}
+#ifdef CONFIG_ATH10K_DEBUG
+	else {
+		ar->debug.tx_ok++;
+		ar->debug.tx_ok_bytes += msdu->len;
+	}
+#endif
 
 	ieee80211_tx_status(htt->ar->hw, msdu);
 	/* we do not own the msdu anymore */
@@ -156,9 +332,6 @@ struct ath10k_peer *ath10k_peer_find_by_id(struct ath10k *ar, int peer_id)
 {
 	struct ath10k_peer *peer;
 
-	if (peer_id >= BITS_PER_TYPE(peer->peer_ids))
-		return NULL;
-
 	lockdep_assert_held(&ar->data_lock);
 
 	list_for_each_entry(peer, &ar->peers, list)
@@ -182,7 +355,7 @@ static int ath10k_wait_for_peer_common(struct ath10k *ar, int vdev_id,
 
 			(mapped == expect_mapped ||
 			 test_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags));
-		}), 3 * HZ);
+		}), 1 * HZ);
 
 	if (time_left == 0)
 		return -ETIMEDOUT;
@@ -254,10 +427,11 @@ void ath10k_peer_unmap_event(struct ath10k_htt *htt,
 	if (!peer) {
 		ath10k_warn(ar, "peer-unmap-event: unknown peer id %d\n",
 			    ev->peer_id);
+		/* ath10k_dump_peer_info(ar); */
 		goto exit;
 	}
 
-	ath10k_dbg(ar, ATH10K_DBG_HTT, "htt peer unmap vdev %d peer %pM id %d\n",
+	ath10k_dbg(ar, ATH10K_DBG_HTT, "removing peer, htt peer unmap vdev %d peer %pM id %d\n",
 		   peer->vdev_id, peer->addr, ev->peer_id);
 
 	ar->peer_map[ev->peer_id] = NULL;
