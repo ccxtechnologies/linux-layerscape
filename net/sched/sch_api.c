@@ -921,7 +921,7 @@ static void notify_and_destroy(struct net *net, struct sk_buff *skb,
 		qdisc_notify(net, skb, n, clid, old, new);
 
 	if (old)
-		qdisc_put(old);
+		qdisc_destroy(old);
 }
 
 /* Graft qdisc "new" to class "classid" of qdisc "parent" or
@@ -974,7 +974,7 @@ static int qdisc_graft(struct net_device *dev, struct Qdisc *parent,
 				qdisc_refcount_inc(new);
 
 			if (!ingress)
-				qdisc_put(old);
+				qdisc_destroy(old);
 		}
 
 skip:
@@ -1308,7 +1308,8 @@ check_loop_fn(struct Qdisc *q, unsigned long cl, struct qdisc_walker *w)
 }
 
 const struct nla_policy rtm_tca_policy[TCA_MAX + 1] = {
-	[TCA_KIND]		= { .type = NLA_STRING },
+	[TCA_KIND]		= { .type = NLA_NUL_STRING,
+				    .len = IFNAMSIZ - 1 },
 	[TCA_RATE]		= { .type = NLA_BINARY,
 				    .len = sizeof(struct tc_estimator) },
 	[TCA_STAB]		= { .type = NLA_NESTED },
@@ -1581,7 +1582,7 @@ graft:
 	err = qdisc_graft(dev, p, skb, n, clid, q, NULL, extack);
 	if (err) {
 		if (q)
-			qdisc_put(q);
+			qdisc_destroy(q);
 		return err;
 	}
 
@@ -1830,6 +1831,8 @@ static void tc_bind_tclass(struct Qdisc *q, u32 portid, u32 clid,
 
 	cl = cops->find(q, portid);
 	if (!cl)
+		return;
+	if (!cops->tcf_block)
 		return;
 	block = cops->tcf_block(q, cl, NULL);
 	if (!block)

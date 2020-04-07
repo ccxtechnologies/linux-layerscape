@@ -164,6 +164,21 @@
 /* Bit fields */
 
 /* Global SoC Bus Configuration INCRx Register 0 */
+#ifdef CONFIG_OF
+#define DWC3_GSBUSCFG0_DATARD_SHIFT	28
+#define DWC3_GSBUSCFG0_DATARD(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DATARD_SHIFT)
+#define DWC3_GSBUSCFG0_DESCRD_SHIFT	24
+#define DWC3_GSBUSCFG0_DESCRD(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DESCRD_SHIFT)
+#define DWC3_GSBUSCFG0_DATAWR_SHIFT	20
+#define DWC3_GSBUSCFG0_DATAWR(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DATAWR_SHIFT)
+#define DWC3_GSBUSCFG0_DESCWR_SHIFT	16
+#define DWC3_GSBUSCFG0_DESCWR(n)	(((n) & 0xf)		\
+			<< DWC3_GSBUSCFG0_DESCWR_SHIFT)
+#endif
+
 #define DWC3_GSBUSCFG0_INCR256BRSTENA	(1 << 7) /* INCR256 burst */
 #define DWC3_GSBUSCFG0_INCR128BRSTENA	(1 << 6) /* INCR128 burst */
 #define DWC3_GSBUSCFG0_INCR64BRSTENA	(1 << 5) /* INCR64 burst */
@@ -595,14 +610,6 @@
 #define DWC3_OSTS_VBUSVLD		BIT(1)
 #define DWC3_OSTS_CONIDSTS		BIT(0)
 
-/* Partial XHCI Register and Bit fields for quirk */
-#define XHCI_HCSPARAMS1		0x4
-#define XHCI_PORTSC_BASE	0x400
-#define PORT_POWER			(1 << 9)
-#define HCS_MAX_PORTS(p)	(((p) >> 24) & 0x7f)
-#define XHCI_HC_LENGTH(p)	(((p)>>00)&0x00ff)
-#define HC_LENGTH(p)		XHCI_HC_LENGTH(p)
-
 /* Structures */
 
 struct dwc3_trb;
@@ -1012,7 +1019,7 @@ struct dwc3_scratchpad_array {
  *				interrupted
  * @quirk_stop_ep_in_u1: replace stop commad with disable slot command
  * @dis_metastability_quirk: set to disable metastability quirk.
- * @host-vbus-glitches: set to avoid vbus glitch during
+ * @host_vbus_glitches: set to avoid vbus glitch during
  *                      xhci reset.
  * @imod_interval: set the interrupt moderation interval in 250ns
  *                 increments or 0 to disable.

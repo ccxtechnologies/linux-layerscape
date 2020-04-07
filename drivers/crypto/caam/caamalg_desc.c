@@ -510,6 +510,7 @@ void cnstr_shdsc_aead_givencap(u32 * const desc, struct alginfo *cdata,
 			       const bool is_qi, int era)
 {
 	u32 geniv, moveiv;
+	u32 *wait_cmd;
 
 	/* Note: Context registers are saved. */
 	init_sh_desc_key_aead(desc, cdata, adata, is_rfc3686, nonce, era);
@@ -605,6 +606,14 @@ copy_iv:
 
 	/* Will read cryptlen */
 	append_math_add(desc, VARSEQINLEN, SEQINLEN, REG0, CAAM_CMD_SZ);
+
+	/*
+	 * Wait for IV transfer (ofifo -> class2) to finish before starting
+	 * ciphertext transfer (ofifo -> external memory).
+	 */
+	wait_cmd = append_jump(desc, JUMP_JSL | JUMP_TEST_ALL | JUMP_COND_NIFP);
+	set_jump_tgt_here(desc, wait_cmd);
+
 	append_seq_fifo_load(desc, 0, FIFOLD_CLASS_BOTH | KEY_VLF |
 			     FIFOLD_TYPE_MSG1OUT2 | FIFOLD_TYPE_LASTBOTH);
 	append_seq_fifo_store(desc, 0, FIFOST_TYPE_MESSAGE_DATA | KEY_VLF);
@@ -649,11 +658,21 @@ void cnstr_shdsc_tls_encap(u32 * const desc, struct alginfo *cdata,
 	 * Compute the index (in bytes) for the LOAD with destination of
 	 * Class 1 Data Size Register and for the LOAD that generates padding
 	 */
-	if (adata->key_inline) {
+	if (adata->key_inline && cdata->key_inline) {
 		idx_ld_datasz = DESC_TLS10_ENC_LEN + adata->keylen_pad +
 				cdata->keylen - 4 * CAAM_CMD_SZ;
 		idx_ld_pad = DESC_TLS10_ENC_LEN + adata->keylen_pad +
 			     cdata->keylen - 2 * CAAM_CMD_SZ;
+	} else if (adata->key_inline && !cdata->key_inline) {
+		idx_ld_datasz = DESC_TLS10_ENC_LEN + adata->keylen_pad +
+				CAAM_PTR_SZ - 4 * CAAM_CMD_SZ;
+		idx_ld_pad = DESC_TLS10_ENC_LEN + adata->keylen_pad +
+			     CAAM_PTR_SZ - 2 * CAAM_CMD_SZ;
+	} else if (adata->key_inline && !cdata->key_inline) {
+		idx_ld_datasz = DESC_TLS10_ENC_LEN + cdata->keylen +
+				CAAM_PTR_SZ - 4 * CAAM_CMD_SZ;
+		idx_ld_pad = DESC_TLS10_ENC_LEN + cdata->keylen +
+			     CAAM_PTR_SZ - 2 * CAAM_CMD_SZ;
 	} else {
 		idx_ld_datasz = DESC_TLS10_ENC_LEN + 2 * CAAM_PTR_SZ -
 				4 * CAAM_CMD_SZ;
@@ -697,11 +716,14 @@ void cnstr_shdsc_tls_encap(u32 * const desc, struct alginfo *cdata,
 	append_operation(desc, cdata->algtype | OP_ALG_AS_INITFINAL |
 			 OP_ALG_ENCRYPT);
 
-	/* payloadlen = input data length - (assoclen + ivlen) */
-	append_math_sub_imm_u32(desc, REG0, SEQINLEN, IMM, assoclen + ivsize);
+	/* payloadlen = input data length
+	 * - (assoclen + ivsize + xplicit ivsize)
+	 */
+	append_math_sub_imm_u32(desc, REG0, SEQINLEN,
+				IMM, assoclen + 2 * ivsize);
 
-	/* math1 = payloadlen + icvlen */
-	append_math_add_imm_u32(desc, REG1, REG0, IMM, authsize);
+	/* math1 = payloadlen + icvlen + xplicit ivsize */
+	append_math_add_imm_u32(desc, REG1, REG0, IMM, authsize + ivsize);
 
 	/* padlen = block_size - math1 % block_size */
 	append_math_and_imm_u32(desc, REG3, REG1, IMM, blocksize - 1);
@@ -740,6 +762,11 @@ void cnstr_shdsc_tls_encap(u32 * const desc, struct alginfo *cdata,
 	/* read assoc for authentication */
 	append_seq_fifo_load(desc, assoclen, FIFOLD_CLASS_CLASS2 |
 			     FIFOLD_TYPE_MSG);
+
+	/* read xplicit iv in case of >TL10 */
+	append_seq_fifo_load(desc, ivsize, FIFOLD_CLASS_CLASS1 |
+				     FIFOLD_TYPE_MSG);
+
 	/* insnoop payload */
 	append_seq_fifo_load(desc, 0, FIFOLD_CLASS_BOTH | FIFOLD_TYPE_MSG |
 			     FIFOLD_TYPE_LAST2 | FIFOLDST_VLF);

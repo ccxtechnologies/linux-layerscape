@@ -1,5 +1,5 @@
 /* Copyright 2008-2013 Freescale Semiconductor Inc.
- * Copyright 2017-2018 NXP
+ * Copyright 2017-2019 NXP
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -72,6 +72,9 @@
 #ifdef CONFIG_FSL_DPAA_DBG_LOOP
 #include "dpaa_debugfs.h"
 #endif /* CONFIG_FSL_DPAA_DBG_LOOP */
+#ifdef CONFIG_FSL_DPAA_CEETM
+#include "dpaa_eth_ceetm.h"
+#endif
 
 /* CREATE_TRACE_POINTS only needs to be defined once. Other dpa files
  * using trace events only need to #include <trace/events/sched.h>
@@ -106,11 +109,6 @@ static const char rtx[][3] = {
 	[TX] = "TX"
 };
 
-#ifndef CONFIG_PPC
-bool dpaa_errata_a010022;
-EXPORT_SYMBOL(dpaa_errata_a010022);
-#endif
-
 /* BM */
 
 #define DPAA_ETH_MAX_PAD (L1_CACHE_BYTES * 8)
@@ -119,6 +117,10 @@ static uint8_t dpa_priv_common_bpid;
 
 #ifdef CONFIG_FSL_DPAA_DBG_LOOP
 struct net_device *dpa_loop_netdevs[20];
+#endif
+
+#ifdef CONFIG_FSL_DPAA_CEETM
+extern struct Qdisc_ops ceetm_qdisc_ops;
 #endif
 
 #ifdef CONFIG_PM
@@ -779,16 +781,6 @@ static int dpa_private_netdev_init(struct net_device *net_dev)
 	/* Advertise NETIF_F_HW_ACCEL_MQ to avoid Tx timeout warnings */
 	net_dev->features |= NETIF_F_HW_ACCEL_MQ;
 
-#ifndef CONFIG_PPC
-	/* Due to the A010022 FMan errata, we can not use S/G frames. We need
-	 * to stop advertising S/G and GSO support.
-	 */
-	if (unlikely(dpaa_errata_a010022)) {
-		net_dev->hw_features &= ~NETIF_F_SG;
-		net_dev->features &= ~NETIF_F_GSO;
-	}
-#endif
-
 	return dpa_netdev_init(net_dev, mac_addr, tx_timeout);
 }
 
@@ -1144,26 +1136,6 @@ static struct platform_driver dpa_driver = {
 	.remove		= dpa_remove
 };
 
-#ifndef CONFIG_PPC
-static bool __init __cold soc_has_errata_a010022(void)
-{
-#ifdef CONFIG_SOC_BUS
-	const struct soc_device_attribute soc_msi_matches[] = {
-		{ .family = "QorIQ LS1043A",
-		  .data = NULL },
-		{ },
-	};
-
-	if (soc_device_match(soc_msi_matches))
-		return true;
-
-	return false;
-#else
-	return true; /* cannot identify SoC */
-#endif
-}
-#endif
-
 static int __init __cold dpa_load(void)
 {
 	int	 _errno;
@@ -1179,11 +1151,6 @@ static int __init __cold dpa_load(void)
 	dpa_max_frm = fm_get_max_frm();
 	dpa_num_cpus = num_possible_cpus();
 
-#ifndef CONFIG_PPC
-	/* Detect if the current SoC requires the 4K alignment workaround */
-	dpaa_errata_a010022 = soc_has_errata_a010022();
-#endif
-
 #ifdef CONFIG_FSL_DPAA_DBG_LOOP
 	memset(dpa_loop_netdevs, 0, sizeof(dpa_loop_netdevs));
 #endif
@@ -1198,6 +1165,14 @@ static int __init __cold dpa_load(void)
 	pr_debug(KBUILD_MODNAME ": %s:%s() ->\n",
 		KBUILD_BASENAME".c", __func__);
 
+#ifdef CONFIG_FSL_DPAA_CEETM
+	_errno = register_qdisc(&ceetm_qdisc_ops);
+	if (unlikely(_errno))
+		pr_err(KBUILD_MODNAME
+		       ": %s:%hu:%s(): register_qdisc() = %d\n",
+		       KBUILD_BASENAME ".c", __LINE__, __func__, _errno);
+#endif
+
 	return _errno;
 }
 module_init(dpa_load);
@@ -1206,6 +1181,10 @@ static void __exit __cold dpa_unload(void)
 {
 	pr_debug(KBUILD_MODNAME ": -> %s:%s()\n",
 		KBUILD_BASENAME".c", __func__);
+
+#ifdef CONFIG_FSL_DPAA_CEETM
+	unregister_qdisc(&ceetm_qdisc_ops);
+#endif
 
 	platform_driver_unregister(&dpa_driver);
 

@@ -2793,8 +2793,8 @@ static struct caam_aead_alg driver_aeads[] = {
 	{
 		.aead = {
 			.base = {
-				.cra_name = "tls10(hmac(sha1),cbc(aes))",
-				.cra_driver_name = "tls10-hmac-sha1-cbc-aes-caam-qi",
+				.cra_name = "tls11(hmac(sha1),cbc(aes))",
+				.cra_driver_name = "tls11-hmac-sha1-cbc-aes-caam-qi",
 				.cra_blocksize = AES_BLOCK_SIZE,
 			},
 			.setkey = tls_setkey,
@@ -2807,6 +2807,26 @@ static struct caam_aead_alg driver_aeads[] = {
 		.caam = {
 			.class1_alg_type = OP_ALG_ALGSEL_AES | OP_ALG_AAI_CBC,
 			.class2_alg_type = OP_ALG_ALGSEL_SHA1 |
+					   OP_ALG_AAI_HMAC_PRECOMP,
+		},
+	},
+	{
+		.aead = {
+			.base = {
+				.cra_name = "tls12(hmac(sha256),cbc(aes))",
+				.cra_driver_name = "tls12-hmac-sha256-cbc-aes-caam-qi",
+				.cra_blocksize = AES_BLOCK_SIZE,
+			},
+			.setkey = tls_setkey,
+			.setauthsize = tls_setauthsize,
+			.encrypt = tls_encrypt,
+			.decrypt = tls_decrypt,
+			.ivsize = AES_BLOCK_SIZE,
+			.maxauthsize = SHA256_DIGEST_SIZE,
+		},
+		.caam = {
+			.class1_alg_type = OP_ALG_ALGSEL_AES | OP_ALG_AAI_CBC,
+			.class2_alg_type = OP_ALG_ALGSEL_SHA256 |
 					   OP_ALG_AAI_HMAC_PRECOMP,
 		}
 	}
@@ -2985,6 +3005,10 @@ int caam_qi_algapi_init(struct device *ctrldev)
 	u32 aes_vid, aes_inst, des_inst, md_vid, md_inst;
 	unsigned int md_limit = SHA512_DIGEST_SIZE;
 	bool registered = false;
+
+	/* Make sure this runs only on (DPAA 1.x) QI */
+	if (!priv->qi_present || caam_dpaa2)
+		return 0;
 
 	/*
 	 * Register crypto algorithms the device supports.

@@ -1110,14 +1110,14 @@ static int __test_tls(struct crypto_aead *tfm, int enc,
 		memcpy(key, template[i].key, template[i].klen);
 
 		ret = crypto_aead_setkey(tfm, key, template[i].klen);
-		if (!ret == template[i].fail) {
+		if (template[i].fail == !ret) {
 			pr_err("alg: tls%s: setkey failed on test %d for %s: flags=%x\n",
 			       d, i, algo, crypto_aead_get_flags(tfm));
 			goto out;
 		} else if (ret)
 			continue;
 
-		authsize = 20;
+		authsize = template[i].authlen;
 		ret = crypto_aead_setauthsize(tfm, authsize);
 		if (ret) {
 			pr_err("alg: aead%s: Failed to set authsize to %u on test %d for %s\n",
@@ -1629,8 +1629,8 @@ static int test_comp(struct crypto_comp *tfm,
 		int ilen;
 		unsigned int dlen = COMP_BUF_SIZE;
 
-		memset(output, 0, sizeof(COMP_BUF_SIZE));
-		memset(decomp_output, 0, sizeof(COMP_BUF_SIZE));
+		memset(output, 0, COMP_BUF_SIZE);
+		memset(decomp_output, 0, COMP_BUF_SIZE);
 
 		ilen = ctemplate[i].inlen;
 		ret = crypto_comp_compress(tfm, ctemplate[i].input,
@@ -1674,7 +1674,7 @@ static int test_comp(struct crypto_comp *tfm,
 		int ilen;
 		unsigned int dlen = COMP_BUF_SIZE;
 
-		memset(decomp_output, 0, sizeof(COMP_BUF_SIZE));
+		memset(decomp_output, 0, COMP_BUF_SIZE);
 
 		ilen = dtemplate[i].inlen;
 		ret = crypto_comp_decompress(tfm, dtemplate[i].input,
@@ -3745,12 +3745,21 @@ static const struct alg_test_desc alg_test_descs[] = {
 			.hash = __VECS(tgr192_tv_template)
 		}
 	}, {
-		.alg = "tls10(hmac(sha1),cbc(aes))",
+		.alg = "tls11(hmac(sha1),cbc(aes))",
 		.test = alg_test_tls,
 		.suite = {
 			.tls = {
 				.enc = __VECS(tls_enc_tv_template),
 				.dec = __VECS(tls_dec_tv_template)
+			}
+		}
+	}, {
+		.alg = "tls12(hmac(sha256),cbc(aes))",
+		.test = alg_test_tls,
+		.suite = {
+			.tls = {
+				.enc = __VECS(tls12_enc_tv_template),
+				.dec = __VECS(tls12_dec_tv_template)
 			}
 		}
 	}, {

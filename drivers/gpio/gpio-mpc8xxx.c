@@ -130,15 +130,15 @@ static int mpc8xxx_gpio_to_irq(struct gpio_chip *gc, unsigned offset)
 
 static irqreturn_t mpc8xxx_gpio_irq_cascade(int irq, void *data)
 {
-	struct mpc8xxx_gpio_chip *mpc8xxx_gc = (struct mpc8xxx_gpio_chip *)data;
+	struct mpc8xxx_gpio_chip *mpc8xxx_gc = data;
 	struct gpio_chip *gc = &mpc8xxx_gc->gc;
-	unsigned int mask;
+	unsigned long mask;
+	int i;
 
 	mask = gc->read_reg(mpc8xxx_gc->regs + GPIO_IER)
 		& gc->read_reg(mpc8xxx_gc->regs + GPIO_IMR);
-	if (mask)
-		generic_handle_irq(irq_linear_revmap(mpc8xxx_gc->irq,
-						     32 - ffs(mask)));
+	for_each_set_bit(i, &mask, 32)
+		generic_handle_irq(irq_linear_revmap(mpc8xxx_gc->irq, 31 - i));
 
 	return IRQ_HANDLED;
 }
@@ -296,6 +296,7 @@ static const struct mpc8xxx_gpio_devtype mpc512x_gpio_devtype = {
 
 static const struct mpc8xxx_gpio_devtype ls1028a_gpio_devtype = {
 	.gpio_dir_in_init = ls1028a_gpio_dir_in_init,
+	.irq_set_type = mpc8xxx_irq_set_type,
 };
 
 static const struct mpc8xxx_gpio_devtype mpc5125_gpio_devtype = {
@@ -377,7 +378,8 @@ static int mpc8xxx_probe(struct platform_device *pdev)
 	 * It's assumed that only a single type of gpio controller is available
 	 * on the current machine, so overwriting global data is fine.
 	 */
-	mpc8xxx_irq_chip.irq_set_type = devtype->irq_set_type;
+	if (devtype->irq_set_type)
+		mpc8xxx_irq_chip.irq_set_type = devtype->irq_set_type;
 
 	if (devtype->gpio_dir_out)
 		gc->direction_output = devtype->gpio_dir_out;
@@ -409,11 +411,13 @@ static int mpc8xxx_probe(struct platform_device *pdev)
 	if (devtype->gpio_dir_in_init)
 		devtype->gpio_dir_in_init(gc);
 
-	ret = request_irq(mpc8xxx_gc->irqn, mpc8xxx_gpio_irq_cascade,
-		IRQF_NO_THREAD | IRQF_SHARED, "gpio-cascade", mpc8xxx_gc);
+	ret = devm_request_irq(&pdev->dev, mpc8xxx_gc->irqn,
+			       mpc8xxx_gpio_irq_cascade,
+			       IRQF_NO_THREAD | IRQF_SHARED, "gpio-cascade",
+			       mpc8xxx_gc);
 	if (ret) {
-		pr_err("%s: failed to request_irq(%d), ret = %d\n",
-				np->full_name, mpc8xxx_gc->irqn, ret);
+		dev_err(&pdev->dev, "%s: failed to devm_request_irq(%d), ret = %d\n",
+			np->full_name, mpc8xxx_gc->irqn, ret);
 		goto err;
 	}
 

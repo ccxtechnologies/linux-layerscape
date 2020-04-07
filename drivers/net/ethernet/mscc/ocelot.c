@@ -262,8 +262,15 @@ static int ocelot_vlan_vid_add(struct net_device *dev, u16 vid, bool pvid,
 		port->pvid = vid;
 
 	/* Untagged egress vlan clasification */
-	if (untagged)
+	if (untagged && port->vid != vid) {
+		if (port->vid) {
+			dev_err(ocelot->dev,
+				"Port already has a native VLAN: %d\n",
+				port->vid);
+			return -EBUSY;
+		}
 		port->vid = vid;
+	}
 
 	ocelot_vlan_port_apply(ocelot, port);
 
@@ -363,26 +370,8 @@ static void ocelot_port_adjust_link(struct net_device *dev)
 	u8 p = port->chip_port;
 	int speed, atop_wm, mode = 0;
 
-	switch (dev->phydev->speed) {
-	case SPEED_10:
-		speed = OCELOT_SPEED_10;
-		break;
-	case SPEED_100:
-		speed = OCELOT_SPEED_100;
-		break;
-	case SPEED_1000:
-		speed = OCELOT_SPEED_1000;
-		mode = DEV_MAC_MODE_CFG_GIGA_MODE_ENA;
-		break;
-	case SPEED_2500:
-		speed = OCELOT_SPEED_2500;
-		mode = DEV_MAC_MODE_CFG_GIGA_MODE_ENA;
-		break;
-	default:
-		netdev_err(dev, "Unsupported PHY speed: %d\n",
-			   dev->phydev->speed);
-		return;
-	}
+	speed = OCELOT_SPEED_1000;
+	mode = DEV_MAC_MODE_CFG_GIGA_MODE_ENA;
 
 	phy_print_status(dev->phydev);
 
@@ -915,7 +904,7 @@ end:
 static int ocelot_vlan_rx_add_vid(struct net_device *dev, __be16 proto,
 				  u16 vid)
 {
-	return ocelot_vlan_vid_add(dev, vid, false, true);
+	return ocelot_vlan_vid_add(dev, vid, false, false);
 }
 
 static int ocelot_vlan_rx_kill_vid(struct net_device *dev, __be16 proto,
@@ -1922,12 +1911,19 @@ EXPORT_SYMBOL(ocelot_init);
 void ocelot_deinit(struct ocelot *ocelot)
 {
 	struct ocelot_ace_rule *rule = container_of(&ocelot, struct ocelot_ace_rule, ocelot);
+	struct ocelot_port *port;
+	int i;
 
 	cancel_delayed_work(&ocelot->stats_work);
 	destroy_workqueue(ocelot->stats_queue);
 	mutex_destroy(&ocelot->stats_lock);
 	ocelot_ace_rule_offload_del(rule);
 	ocelot_ace_deinit();
+
+	for (i = 0; i < ocelot->num_phys_ports; i++) {
+		port = ocelot->ports[i];
+		skb_queue_purge(&port->tx_skbs);
+	}
 }
 EXPORT_SYMBOL(ocelot_deinit);
 

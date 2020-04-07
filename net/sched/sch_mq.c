@@ -65,7 +65,7 @@ static void mq_destroy(struct Qdisc *sch)
 	if (!priv->qdiscs)
 		return;
 	for (ntx = 0; ntx < dev->num_tx_queues && priv->qdiscs[ntx]; ntx++)
-		qdisc_put(priv->qdiscs[ntx]);
+		qdisc_destroy(priv->qdiscs[ntx]);
 	kfree(priv->qdiscs);
 }
 
@@ -119,7 +119,7 @@ static void mq_attach(struct Qdisc *sch)
 		qdisc = priv->qdiscs[ntx];
 		old = dev_graft_qdisc(qdisc->dev_queue, qdisc);
 		if (old)
-			qdisc_put(old);
+			qdisc_destroy(old);
 #ifdef CONFIG_NET_SCHED
 		if (ntx < dev->real_num_tx_queues)
 			qdisc_hash_add(qdisc, false);
@@ -242,7 +242,8 @@ static int mq_dump_class_stats(struct Qdisc *sch, unsigned long cl,
 	struct netdev_queue *dev_queue = mq_queue_get(sch, cl);
 
 	sch = dev_queue->qdisc_sleeping;
-	if (gnet_stats_copy_basic(&sch->running, d, NULL, &sch->bstats) < 0 ||
+	if (gnet_stats_copy_basic(&sch->running, d, sch->cpu_bstats,
+				  &sch->bstats) < 0 ||
 	    gnet_stats_copy_queue(d, NULL, &sch->qstats, sch->q.qlen) < 0)
 		return -1;
 	return 0;

@@ -130,6 +130,11 @@
 					  IRQ_TYPE_LEVEL_LOW)>;
 	};
 
+	pmu {
+		compatible = "arm,cortex-a72-pmu";
+		interrupts = <GIC_PPI 7 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
 	gic: interrupt-controller@6000000 {
 		compatible= "arm,gic-v3";
 		#address-cells = <2>;
@@ -181,23 +186,25 @@
 		};
 
 		usb0:usb@3100000 {
-			compatible= "snps,dwc3";
+			compatible= "fsl,ls1028a-dwc3";
 			reg= <0x0 0x3100000 0x0 0x10000>;
 			interrupts= <0 80 0x4>;
 			dr_mode= "host";
 			snps,dis_rxdet_inp3_quirk;
 			snps,quirk-frame-length-adjustment = <0x20>;
 			snps,incr-burst-type-adjustment = <1>, <4>, <8>, <16>;
+			dma-coherent;
 		};
 
 		usb1:usb@3110000 {
-			compatible= "snps,dwc3";
+			compatible= "fsl,ls1028a-dwc3";
 			reg= <0x0 0x3110000 0x0 0x10000>;
 			interrupts= <0 81 0x4>;
 			dr_mode= "host";
 			snps,dis_rxdet_inp3_quirk;
 			snps,quirk-frame-length-adjustment = <0x20>;
 			snps,incr-burst-type-adjustment = <1>, <4>, <8>, <16>;
+			dma-coherent;
 		};
 
 		fspi: spi@20c0000 {
@@ -552,7 +559,7 @@
 				compatible = "fsl,enetc";
 				reg = <0x000100 0 0 0 0>;
 			};
-			ethernet@0,2 {
+			enetc_port2: ethernet@0,2 {
 				compatible = "fsl,enetc";
 				reg = <0x000200 0 0 0 0>;
 				fixed-link {
@@ -572,40 +579,54 @@
 				clocks = <&clockgen 4 0>;
 				little-endian;
 			};
-			switch@0,5 {
-				compatible = "mscc,felix-switch";
+
+			ethernet-switch@0,5 {
 				reg = <0x000500 0 0 0 0>;
 				/* IEP INT_B */
 				interrupts = <GIC_SPI 95 IRQ_TYPE_LEVEL_HIGH>;
 
-				ports {
+				mscc_felix_ports: ports {
 					#address-cells = <1>;
 					#size-cells = <0>;
 
 					/* external ports */
-					switch_port0: port@0 {
+					mscc_felix_port0: port@0 {
 						reg = <0>;
+						status = "disabled";
 					};
-					switch_port1: port@1 {
+
+					mscc_felix_port1: port@1 {
 						reg = <1>;
+						status = "disabled";
 					};
-					switch_port2: port@2 {
+
+					mscc_felix_port2: port@2 {
 						reg = <2>;
+						status = "disabled";
 					};
-					switch_port3: port@3 {
+
+					mscc_felix_port3: port@3 {
 						reg = <3>;
+						status = "disabled";
 					};
+
 					/* internal to-cpu ports */
-					port@4 {
+					mscc_felix_port4: port@4 {
 						reg = <4>;
+						ethernet = <&enetc_port2>;
+						phy-mode = "gmii";
+
 						fixed-link {
 							speed = <1000>;
 							full-duplex;
 						};
 					};
-					port@5 {
+
+					mscc_felix_port5: port@5 {
 						reg = <5>;
-						ethernet = <&enetc_port3>;
+						phy-mode = "gmii";
+						status = "disabled";
+
 						fixed-link {
 							speed = <1000>;
 							full-duplex;
@@ -613,9 +634,12 @@
 					};
 				};
 			};
+
 			enetc_port3: ethernet@0,6 {
 				compatible = "fsl,enetc";
 				reg = <0x000600 0 0 0 0>;
+				status = "disabled";
+
 				fixed-link {
 					speed = <1000>;
 					full-duplex;

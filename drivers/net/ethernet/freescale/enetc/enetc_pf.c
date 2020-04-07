@@ -534,6 +534,12 @@ static void enetc_configure_port_mac(struct enetc_hw *hw,
 		enetc_port_wr(hw, ENETC_PM0_IF_MODE, ENETC_PM0_IFM_XGMII);
 		enetc_port_wr(hw, ENETC_PM1_IF_MODE, ENETC_PM0_IFM_XGMII);
 	}
+
+	/* on LS1028A the MAC Rx FIFO defaults to value 2, which is too high and
+	 * may lead to Rx lock-up under traffic.  Set it to 1 instead, as
+	 * recommended by the hardware team.
+	 */
+	enetc_port_wr(hw, ENETC_PM0_RX_FIFO, ENETC_PM0_RX_FIFO_VAL);
 }
 
 static void enetc_configure_port_pmac(struct enetc_hw *hw)
@@ -957,6 +963,7 @@ err_alloc_si_res:
 	si->ndev = NULL;
 	free_netdev(ndev);
 err_alloc_netdev:
+	enetc_mdio_remove(pf);
 	enetc_of_put_phy(pf);
 err_map_pf_space:
 	enetc_pci_remove(pdev);

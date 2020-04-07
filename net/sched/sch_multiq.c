@@ -175,7 +175,7 @@ multiq_destroy(struct Qdisc *sch)
 
 	tcf_block_put(q->block);
 	for (band = 0; band < q->bands; band++)
-		qdisc_put(q->queues[band]);
+		qdisc_destroy(q->queues[band]);
 
 	kfree(q->queues);
 }
@@ -204,7 +204,7 @@ static int multiq_tune(struct Qdisc *sch, struct nlattr *opt,
 			q->queues[i] = &noop_qdisc;
 			qdisc_tree_reduce_backlog(child, child->q.qlen,
 						  child->qstats.backlog);
-			qdisc_put(child);
+			qdisc_destroy(child);
 		}
 	}
 
@@ -228,7 +228,7 @@ static int multiq_tune(struct Qdisc *sch, struct nlattr *opt,
 					qdisc_tree_reduce_backlog(old,
 								  old->q.qlen,
 								  old->qstats.backlog);
-					qdisc_put(old);
+					qdisc_destroy(old);
 				}
 				sch_tree_unlock(sch);
 			}
@@ -343,7 +343,7 @@ static int multiq_dump_class_stats(struct Qdisc *sch, unsigned long cl,
 
 	cl_q = q->queues[cl - 1];
 	if (gnet_stats_copy_basic(qdisc_root_sleeping_running(sch),
-				  d, NULL, &cl_q->bstats) < 0 ||
+				  d, cl_q->cpu_bstats, &cl_q->bstats) < 0 ||
 	    gnet_stats_copy_queue(d, NULL, &cl_q->qstats, cl_q->q.qlen) < 0)
 		return -1;
 
