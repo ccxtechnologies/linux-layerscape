@@ -221,6 +221,7 @@ static int dp83867_of_init(struct phy_device *phydev)
 		return ret;
 	}
 
+	return 0;
 }
 #else
 static int dp83867_of_init(struct phy_device *phydev)
