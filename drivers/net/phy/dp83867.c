@@ -74,6 +74,7 @@
 #define DP83867_PHYCR_FIFO_DEPTH_SHIFT		14
 #define DP83867_PHYCR_FIFO_DEPTH_MASK		(3 << 14)
 #define DP83867_PHYCR_RESERVED_MASK		BIT(11)
+#define DP83867_PHYCR_SGMII_ENABLE		11
 
 /* RGMIIDCTL bits */
 #define DP83867_RGMII_TX_CLK_DELAY_SHIFT	4
@@ -165,8 +166,10 @@ static int dp83867_of_init(struct phy_device *phydev)
 	struct device_node *of_node = dev->of_node;
 	int ret;
 
-	if (!of_node)
+	if (!of_node) {
+		pr_err("No of_node\n");
 		return -ENODEV;
+	}
 
 	dp83867->io_impedance = -EINVAL;
 
@@ -191,15 +194,19 @@ static int dp83867_of_init(struct phy_device *phydev)
 				   &dp83867->rx_id_delay);
 	if (ret &&
 	    (phydev->interface == PHY_INTERFACE_MODE_RGMII_ID ||
-	     phydev->interface == PHY_INTERFACE_MODE_RGMII_RXID))
+	     phydev->interface == PHY_INTERFACE_MODE_RGMII_RXID)) {
+		pr_err("No ti,rx-internal-delay defined in dtb\n");
 		return ret;
+	}
 
 	ret = of_property_read_u32(of_node, "ti,tx-internal-delay",
 				   &dp83867->tx_id_delay);
 	if (ret &&
 	    (phydev->interface == PHY_INTERFACE_MODE_RGMII_ID ||
-	     phydev->interface == PHY_INTERFACE_MODE_RGMII_TXID))
+	     phydev->interface == PHY_INTERFACE_MODE_RGMII_TXID)) {
+		pr_err("No ti,tx-internal-delay defined in dtb\n");
 		return ret;
+	}
 
 	if (of_property_read_bool(of_node, "enet-phy-lane-swap"))
 		dp83867->port_mirroring = DP83867_PORT_MIRROING_EN;
@@ -207,8 +214,13 @@ static int dp83867_of_init(struct phy_device *phydev)
 	if (of_property_read_bool(of_node, "enet-phy-lane-no-swap"))
 		dp83867->port_mirroring = DP83867_PORT_MIRROING_DIS;
 
-	return of_property_read_u32(of_node, "ti,fifo-depth",
+	ret = of_property_read_u32(of_node, "ti,fifo-depth",
 				   &dp83867->fifo_depth);
+	if (ret) {
+		pr_err("No ti,fifo-depth defined in dtb\n");
+		return ret;
+	}
+
 }
 #else
 static int dp83867_of_init(struct phy_device *phydev)
@@ -223,6 +235,8 @@ static int dp83867_config_init(struct phy_device *phydev)
 	int ret, val, bs;
 	u16 delay;
 
+	pr_info("Configuring PHY\n");
+
 	if (!phydev->priv) {
 		dp83867 = devm_kzalloc(&phydev->mdio.dev, sizeof(*dp83867),
 				       GFP_KERNEL);
@@ -231,8 +245,11 @@ static int dp83867_config_init(struct phy_device *phydev)
 
 		phydev->priv = dp83867;
 		ret = dp83867_of_init(phydev);
-		if (ret)
+		if (ret) {
+			pr_err("Failed to initialize PHY\n");
+			phydev->priv = NULL;
 			return ret;
+		}
 	} else {
 		dp83867 = (struct dp83867_private *)phydev->priv;
 	}
@@ -244,31 +261,31 @@ static int dp83867_config_init(struct phy_device *phydev)
 		phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4, val);
 	}
 
+	val = phy_read(phydev, MII_DP83867_PHYCTRL);
+	if (val < 0)
+		return val;
+	val &= ~DP83867_PHYCR_FIFO_DEPTH_MASK;
+	val |= (dp83867->fifo_depth << DP83867_PHYCR_FIFO_DEPTH_SHIFT);
+
+	/* The code below checks if "port mirroring" N/A MODE4 has been
+	 * enabled during power on bootstrap.
+	 *
+	 * Such N/A mode enabled by mistake can put PHY IC in some
+	 * internal testing mode and disable RGMII transmission.
+	 *
+	 * In this particular case one needs to check STRAP_STS1
+	 * register's bit 11 (marked as RESERVED).
+	 */
+
+	bs = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_STRAP_STS1);
+	if (bs & DP83867_STRAP_STS1_RESERVED)
+		val &= ~DP83867_PHYCR_RESERVED_MASK;
+
+	ret = phy_write(phydev, MII_DP83867_PHYCTRL, val);
+	if (ret)
+		return ret;
+
 	if (phy_interface_is_rgmii(phydev)) {
-		val = phy_read(phydev, MII_DP83867_PHYCTRL);
-		if (val < 0)
-			return val;
-		val &= ~DP83867_PHYCR_FIFO_DEPTH_MASK;
-		val |= (dp83867->fifo_depth << DP83867_PHYCR_FIFO_DEPTH_SHIFT);
-
-		/* The code below checks if "port mirroring" N/A MODE4 has been
-		 * enabled during power on bootstrap.
-		 *
-		 * Such N/A mode enabled by mistake can put PHY IC in some
-		 * internal testing mode and disable RGMII transmission.
-		 *
-		 * In this particular case one needs to check STRAP_STS1
-		 * register's bit 11 (marked as RESERVED).
-		 */
-
-		bs = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_STRAP_STS1);
-		if (bs & DP83867_STRAP_STS1_RESERVED)
-			val &= ~DP83867_PHYCR_RESERVED_MASK;
-
-		ret = phy_write(phydev, MII_DP83867_PHYCTRL, val);
-		if (ret)
-			return ret;
-
 		/* Set up RGMII delays */
 		val = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_RGMIICTL);
 
@@ -303,6 +320,20 @@ static int dp83867_config_init(struct phy_device *phydev)
 	}
 
 	if (phydev->interface == PHY_INTERFACE_MODE_SGMII) {
+		val = phy_read(phydev, MII_DP83867_PHYCTRL);
+		if (val < 0) {
+			pr_err("Failed to read PHY Control Register\n");
+			return val;
+		}
+
+		val |= DP83867_PHYCR_SGMII_ENABLE;
+		ret = phy_write(phydev, MII_DP83867_PHYCTRL, val);
+		if (ret) {
+			pr_err("Failed to enable SGMII Mode.\n");
+			return ret;
+		}
+		pr_info("Set to SGMII Mode.\n");
+
 		/* For support SPEED_10 in SGMII mode
 		 * DP83867_10M_SGMII_RATE_ADAPT bit
 		 * has to be cleared by software. That
