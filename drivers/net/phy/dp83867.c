@@ -74,7 +74,7 @@
 #define DP83867_PHYCR_FIFO_DEPTH_SHIFT		14
 #define DP83867_PHYCR_FIFO_DEPTH_MASK		(3 << 14)
 #define DP83867_PHYCR_RESERVED_MASK		BIT(11)
-#define DP83867_PHYCR_SGMII_ENABLE		11
+#define DP83867_PHYCR_SGMII_ENABLE		BIT(11)
 
 /* RGMIIDCTL bits */
 #define DP83867_RGMII_TX_CLK_DELAY_SHIFT	4
@@ -236,8 +236,6 @@ static int dp83867_config_init(struct phy_device *phydev)
 	int ret, val, bs;
 	u16 delay;
 
-	pr_info("Configuring PHY\n");
-
 	if (!phydev->priv) {
 		dp83867 = devm_kzalloc(&phydev->mdio.dev, sizeof(*dp83867),
 				       GFP_KERNEL);
@@ -333,7 +331,6 @@ static int dp83867_config_init(struct phy_device *phydev)
 			pr_err("Failed to enable SGMII Mode.\n");
 			return ret;
 		}
-		pr_info("Set to SGMII Mode.\n");
 
 		/* For support SPEED_10 in SGMII mode
 		 * DP83867_10M_SGMII_RATE_ADAPT bit
