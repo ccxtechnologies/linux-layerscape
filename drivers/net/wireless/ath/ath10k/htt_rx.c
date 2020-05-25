@@ -991,6 +991,48 @@ static bool ath10k_htt_rx_h_channel(struct ath10k *ar,
 	return true;
 }
 
+static int ath10k_sum_sigs_2(int a, int b) {
+	int diff;
+
+	/* 0x80 means value-is-not-set */
+	if (b == 0x80)
+		return a;
+
+	if (a >= b) {
+		/* a is largest value, add to it. */
+		diff = a - b;
+		if (diff == 0)
+			return a + 3;
+		else if (diff == 1)
+			return a + 2;
+		else if (diff == 2)
+			return a + 1;
+		return a;
+	}
+	else {
+		/* b is largest value, add to it. */
+		diff = b - a;
+		if (diff == 0)
+			return b + 3;
+		else if (diff == 1)
+			return b + 2;
+		else if (diff == 2)
+			return b + 1;
+		return b;
+	}
+}
+
+static int ath10k_sum_sigs(int p20, int e20, int e40, int e80) {
+	/* Hacky attempt at summing dbm without resorting to log(10) business */
+	/* 0x80 means value-is-not-set */
+	if (e40 != 0x80) {
+		return ath10k_sum_sigs_2(ath10k_sum_sigs_2(p20, e20), ath10k_sum_sigs_2(e40, e80));
+	}
+	else {
+		return ath10k_sum_sigs_2(p20, e20);
+	}
+}
+
 static void ath10k_htt_rx_h_signal(struct ath10k *ar,
 				   struct ieee80211_rx_status *status,
 				   struct htt_rx_desc *rxd)
@@ -1001,18 +1043,40 @@ static void ath10k_htt_rx_h_signal(struct ath10k *ar,
 		status->chains &= ~BIT(i);
 
 		if (rxd->ppdu_start.rssi_chains[i].pri20_mhz != 0x80) {
-			status->chain_signal[i] = ATH10K_DEFAULT_NOISE_FLOOR +
-				rxd->ppdu_start.rssi_chains[i].pri20_mhz;
+			status->chain_signal[i] = ATH10K_DEFAULT_NOISE_FLOOR
+				+ ath10k_sum_sigs(rxd->ppdu_start.rssi_chains[i].pri20_mhz,
+						  rxd->ppdu_start.rssi_chains[i].ext20_mhz,
+						  rxd->ppdu_start.rssi_chains[i].ext40_mhz,
+						  rxd->ppdu_start.rssi_chains[i].ext80_mhz);
+			/* ath10k_warn(ar, "rx-h-sig, chain[%i] pri20: %d ext20: %d  ext40: %d  ext80: %d\n",
+			 *	    i, rxd->ppdu_start.rssi_chains[i].pri20_mhz,
+			 *          rxd->ppdu_start.rssi_chains[i].ext20_mhz,
+			 *	    rxd->ppdu_start.rssi_chains[i].ext40_mhz,
+			 *          rxd->ppdu_start.rssi_chains[i].ext80_mhz);
+			 */
 
 			status->chains |= BIT(i);
 		}
 	}
 
 	/* FIXME: Get real NF */
-	status->signal = ATH10K_DEFAULT_NOISE_FLOOR +
-			 rxd->ppdu_start.rssi_comb;
-	/* ath10k_warn(ar, "rx-h-sig, signal: %d  chains: 0x%x  chain[0]: %d  chain[1]: %d  chan[2]: %d\n",
-                       status->signal, status->chains, status->chain_signal[0], status->chain_signal[1], status->chain_signal[2]); */
+	/* 0x80 means value-is-not-set on wave-2 firmware.
+	 * For wave-2 firmware, value is not defined and is set to zero. */
+	if (rxd->ppdu_start.rssi_comb_ht &&
+	    (rxd->ppdu_start.rssi_comb_ht != 0x80)) {
+		status->signal = ATH10K_DEFAULT_NOISE_FLOOR +
+			rxd->ppdu_start.rssi_comb_ht;
+	}
+	else {
+		status->signal = ATH10K_DEFAULT_NOISE_FLOOR +
+			rxd->ppdu_start.rssi_comb;
+	}
+
+	/* ath10k_warn(ar, "rx-h-sig, signal: %d  chains: 0x%x  chain[0]: %d  chain[1]: %d  chain[2]: %d chain[3]: %d\n",
+	 *	    status->signal, status->chains, status->chain_signal[0],
+	 *	    status->chain_signal[1], status->chain_signal[2],
+	 *          status->chain_signal[3]);
+	 */
 	status->flag &= ~RX_FLAG_NO_SIGNAL_VAL;
 }
 
@@ -2004,6 +2068,12 @@ static void ath10k_htt_rx_tx_compl_ind(struct ath10k *ar,
 				    tx_done.mpdus_tried,
 				    tx_done.mpdus_failed);*/
 
+			/* workaround for possibly firmware bug */
+			if (unlikely(tx_done.tx_rate_code == ATH10K_CT_TX_BEACON_INVALID_RATE_CODE)) {
+				dev_warn_once(ar->dev, "htt tx, wave-1-ct: fixing invalid VHT TX rate code 0xff\n");
+				tx_done.tx_rate_code = 0;
+			}
+
 			/* kfifo_put: In practice firmware shouldn't fire off per-CE
 			 * interrupt and main interrupt (MSI/-X range case) for the same
 			 * HTC service so it should be safe to use kfifo_put w/o lock.
@@ -2092,6 +2162,12 @@ static void ath10k_htt_rx_tx_compl_ind(struct ath10k *ar,
 			if (unlikely(tx_done.status != HTT_TX_COMPL_STATE_ACK))
 				tx_done.ack_rssi = 0;
 
+			/* workaround for possibly firmware bug */
+			if (unlikely(tx_done.tx_rate_code == ATH10K_CT_TX_BEACON_INVALID_RATE_CODE)) {
+				dev_warn_once(ar->dev, "htt tx, ack-rssi-filled: fixing invalid VHT TX rate code 0xff\n");
+				tx_done.tx_rate_code = 0;
+			}
+
 			ath10k_txrx_tx_unref(htt, &tx_done);
 		}
 	} else {
@@ -2102,6 +2178,12 @@ do_generic:
 		for (i = 0; i < resp->data_tx_completion.num_msdus; i++) {
 			msdu_id = resp->data_tx_completion.msdus[i];
 			tx_done.msdu_id = __le16_to_cpu(msdu_id);
+
+			/* workaround for possibly firmware bug */
+			if (unlikely(tx_done.tx_rate_code == ATH10K_CT_TX_BEACON_INVALID_RATE_CODE)) {
+				dev_warn_once(ar->dev, "htt tx ct: fixing invalid VHT TX rate code 0xff\n");
+				tx_done.tx_rate_code = 0;
+			}
 
 			/* kfifo_put: In practice firmware shouldn't fire off per-CE
 			 * interrupt and main interrupt (MSI/-X range case) for the same

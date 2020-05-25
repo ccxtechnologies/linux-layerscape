@@ -18,7 +18,6 @@
 
 #include "mac.h"
 
-#include <net/cfg80211.h>
 #include <net/mac80211.h>
 #include <linux/etherdevice.h>
 #include <linux/acpi.h>
@@ -4623,8 +4622,10 @@ void ath10k_mgmt_over_wmi_tx_work(struct work_struct *work)
 			     ar->running_fw->fw_file.fw_features)) {
 			paddr = dma_map_single(ar->dev, skb->data,
 					       skb->len, DMA_TO_DEVICE);
-			if (!paddr)
+			if (dma_mapping_error(ar->dev, paddr)) {
+				ieee80211_free_txskb(ar->hw, skb);
 				continue;
+			}
 			ret = ath10k_wmi_mgmt_tx_send(ar, skb, paddr);
 			if (ret) {
 				ath10k_warn(ar, "failed to transmit management frame by ref via WMI: %d\n",
@@ -5589,14 +5590,6 @@ static int ath10k_start(struct ieee80211_hw *hw)
 		goto err_core_stop;
 	}
 
-	if (test_bit(WMI_SERVICE_SPOOF_MAC_SUPPORT, ar->wmi.svc_map)) {
-		ret = ath10k_wmi_scan_prob_req_oui(ar, ar->mac_addr);
-		if (ret) {
-			ath10k_err(ar, "failed to set prob req oui: %i\n", ret);
-			goto err_core_stop;
-		}
-	}
-
 	if (test_bit(WMI_SERVICE_ADAPTIVE_OCS, ar->wmi.svc_map)) {
 		ret = ath10k_wmi_adaptive_qcs(ar, true);
 		if (ret) {
@@ -5815,7 +5808,8 @@ static int ath10k_mac_txpower_recalc(struct ath10k *ar)
 	lockdep_assert_held(&ar->conf_mutex);
 
 	list_for_each_entry(arvif, &ar->arvifs, list) {
-		if (arvif->txpower <= 0)
+		/* txpower not initialized yet? */
+		if (arvif->txpower == INT_MIN)
 			continue;
 
 		if (txpower == -1)
@@ -7819,7 +7813,7 @@ static void ath10k_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	}
 
 	ath10k_dbg(ar, ATH10K_DBG_MAC, "mac flush vdev %d drop %d queues 0x%x\n",
-		   arvif ? arvif->vdev_id : -1, drop, queues);
+		   vid, drop, queues);
 
 	/* mac80211 doesn't care if we really xmit queued frames or not
 	 * we'll collect those frames either way if we stop/delete vdevs
@@ -7858,6 +7852,13 @@ static void ath10k_flush(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 		if (drop || test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL,
 				     ar->running_fw->fw_file.fw_features))
 			goto skip;
+
+		/* I cannot find a good way to know if an individual vdev is flushed or
+		 * not.  So, if that is being requested, just skip the wait.
+		 */
+		if (arvif)
+			goto skip;
+
 	}
 
 	time_left = wait_event_timeout(ar->htt.empty_tx_wq, ({
@@ -9667,7 +9668,6 @@ int ath10k_mac_register(struct ath10k *ar)
 		ar->hw->wiphy->bands[NL80211_BAND_5GHZ] = band;
 	}
 
-	wiphy_read_of_freq_limits(ar->hw->wiphy);
 	ath10k_mac_setup_ht_vht_cap(ar);
 
 	ar->hw->wiphy->interface_modes =
@@ -9917,6 +9917,12 @@ int ath10k_mac_register(struct ath10k *ar)
 	}
 
 	if (test_bit(WMI_SERVICE_SPOOF_MAC_SUPPORT, ar->wmi.svc_map)) {
+		ret = ath10k_wmi_scan_prob_req_oui(ar, ar->mac_addr);
+		if (ret) {
+			ath10k_err(ar, "failed to set prob req oui: %i\n", ret);
+			goto err_dfs_detector_exit;
+		}
+
 		ar->hw->wiphy->features |=
 			NL80211_FEATURE_SCAN_RANDOM_MAC_ADDR;
 	}
@@ -9949,7 +9955,10 @@ int ath10k_mac_register(struct ath10k *ar)
 		goto err_dfs_detector_exit;
 	}
 
-	if (test_bit(WMI_SERVICE_PER_PACKET_SW_ENCRYPT, ar->wmi.svc_map)) {
+	if (test_bit(WMI_SERVICE_PER_PACKET_SW_ENCRYPT, ar->wmi.svc_map) ||
+	    test_bit(ATH10K_FW_FEATURE_CONSUME_BLOCK_ACK_CT, ar->normal_mode_fw.fw_file.fw_features)) {
+			/* assume enough raw tx support for VLAN if a recent CT
+			firmware is detected. */
 		ar->hw->wiphy->interface_modes |= BIT(NL80211_IFTYPE_AP_VLAN);
 		ar->hw->wiphy->software_iftypes |= BIT(NL80211_IFTYPE_AP_VLAN);
 	}
