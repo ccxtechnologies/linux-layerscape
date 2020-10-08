@@ -66,7 +66,7 @@
 #include "key_gen.h"
 #include "caamhash_desc.h"
 
-#define CAAM_CRA_PRIORITY		3000
+#define CAAM_CRA_PRIORITY		299
 
 /* max hash key is max split key size */
 #define CAAM_MAX_HASH_KEY_SIZE		(SHA512_DIGEST_SIZE * 2)
