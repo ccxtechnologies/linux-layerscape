@@ -581,7 +581,7 @@ void ath10k_hw_fill_survey_time(struct ath10k *ar, struct survey_info *survey,
 	survey->time_busy = CCNT_TO_MSEC(ar, rcc);
 }
 
-/* The firmware does not support setting the coverage class. Instead this
+/* The stock firmware does not support setting the coverage class. Instead this
  * function monitors and modifies the corresponding MAC registers.
  */
 static void ath10k_hw_qca988x_set_coverage_class(struct ath10k *ar,
@@ -631,6 +631,15 @@ static void ath10k_hw_qca988x_set_coverage_class(struct ath10k *ar,
 	    timeout_reg == ar->fw_coverage.reg_ack_cts_timeout_conf &&
 	    phyclk_reg == ar->fw_coverage.reg_phyclk)
 		goto unlock;
+
+	{
+		static int did_once = 0;
+		if (!did_once) {
+			ath10k_warn(ar, "set-coverage-class, phyclk: %d  value: %d\n", phyclk, value);
+			did_once = true;
+		}
+	}
+
 
 	/* Store new initial register values from the firmware. */
 	if (slottime_reg != ar->fw_coverage.reg_slottime_conf)
@@ -691,6 +700,22 @@ static void ath10k_hw_qca988x_set_coverage_class(struct ath10k *ar,
 	ath10k_hif_write32(ar,
 			   WLAN_MAC_BASE_ADDRESS + WAVE1_PCU_ACK_CTS_TIMEOUT,
 			   timeout_reg);
+
+	if (test_bit(ATH10K_FW_FEATURE_SET_SPECIAL_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+		/* CT firmware can set and make this value stick w/out all the hackery,
+		 * but go ahead and use this logic to calculate the appropriate values.
+		 * We should then short-circuit this logic earlier in this method because
+		 * the values in the firmware will already match expected values.
+		 * --Ben
+		 */
+		ar->eeprom_overrides.reg_ack_cts = timeout_reg;
+		ar->eeprom_overrides.reg_ifs_slot = slottime_reg;
+
+		ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_ACK_CTS, ar->eeprom_overrides.reg_ack_cts);
+		ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_SLOT, ar->eeprom_overrides.reg_ifs_slot);
+		ar->eeprom_overrides.coverage_already_set = true;
+	}
 
 	/* Ensure we have a debug level of WARN set for the case that the
 	 * coverage class is larger than 0. This is important as we need to
@@ -1145,6 +1170,7 @@ static bool ath10k_qca99x0_rx_desc_msdu_limit_error(struct htt_rx_desc *rxd)
 const struct ath10k_hw_ops qca99x0_ops = {
 	.rx_desc_get_l3_pad_bytes = ath10k_qca99x0_rx_desc_get_l3_pad_bytes,
 	.rx_desc_get_msdu_limit_error = ath10k_qca99x0_rx_desc_msdu_limit_error,
+	.is_rssi_enable = ath10k_htt_tx_rssi_enable,
 };
 
 const struct ath10k_hw_ops qca6174_ops = {

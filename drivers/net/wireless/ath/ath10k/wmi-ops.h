@@ -65,6 +65,8 @@ struct wmi_ops {
 					   enum wmi_dfs_region dfs_reg);
 	struct sk_buff *(*gen_pdev_set_param)(struct ath10k *ar, u32 id,
 					      u32 value);
+	struct sk_buff *(*gen_pdev_set_fwtest)(struct ath10k *ar, u32 id,
+					       u32 value);
 	struct sk_buff *(*gen_init)(struct ath10k *ar);
 	struct sk_buff *(*gen_start_scan)(struct ath10k *ar,
 					  const struct wmi_start_scan_arg *arg);
@@ -125,7 +127,7 @@ struct wmi_ops {
 					  bool deliver_cab);
 	struct sk_buff *(*gen_pdev_set_wmm)(struct ath10k *ar,
 					    const struct wmi_wmm_params_all_arg *arg);
-	struct sk_buff *(*gen_request_stats)(struct ath10k *ar, u32 stats_mask);
+	struct sk_buff *(*gen_request_stats)(struct ath10k *ar, u32 stats_mask, u32 specifier);
 	struct sk_buff *(*gen_force_fw_hang)(struct ath10k *ar,
 					     enum wmi_force_fw_hang_type type,
 					     u32 delay_ms);
@@ -133,6 +135,7 @@ struct wmi_ops {
 	struct sk_buff *(*gen_mgmt_tx_send)(struct ath10k *ar,
 					    struct sk_buff *skb,
 					    dma_addr_t paddr);
+	int (*cleanup_mgmt_tx_send)(struct ath10k *ar, struct sk_buff *msdu);
 	struct sk_buff *(*gen_dbglog_cfg)(struct ath10k *ar, u64 module_enable,
 					  u32 log_level);
 	struct sk_buff *(*gen_pktlog_enable)(struct ath10k *ar, u32 filter);
@@ -442,6 +445,15 @@ ath10k_wmi_get_txbf_conf_scheme(struct ath10k *ar)
 }
 
 static inline int
+ath10k_wmi_cleanup_mgmt_tx_send(struct ath10k *ar, struct sk_buff *msdu)
+{
+	if (!ar->wmi.ops->cleanup_mgmt_tx_send)
+		return -EOPNOTSUPP;
+
+	return ar->wmi.ops->cleanup_mgmt_tx_send(ar, msdu);
+}
+
+static inline int
 ath10k_wmi_mgmt_tx_send(struct ath10k *ar, struct sk_buff *msdu,
 			dma_addr_t paddr)
 {
@@ -569,6 +581,21 @@ ath10k_wmi_pdev_set_param(struct ath10k *ar, u32 id, u32 value)
 		return PTR_ERR(skb);
 
 	return ath10k_wmi_cmd_send(ar, skb, ar->wmi.cmd->pdev_set_param_cmdid);
+}
+
+static inline int
+ath10k_wmi_pdev_set_fwtest(struct ath10k *ar, u32 id, u32 value)
+{
+	struct sk_buff *skb;
+
+	if (!ar->wmi.ops->gen_pdev_set_fwtest)
+		return -EOPNOTSUPP;
+
+	skb = ar->wmi.ops->gen_pdev_set_fwtest(ar, id, value);
+	if (IS_ERR(skb))
+		return PTR_ERR(skb);
+
+	return ath10k_wmi_cmd_send(ar, skb, ar->wmi.cmd->fwtest_cmdid);
 }
 
 static inline int
@@ -1006,25 +1033,33 @@ ath10k_wmi_peer_assoc(struct ath10k *ar,
 }
 
 static inline int
-ath10k_wmi_beacon_send_ref_nowait(struct ath10k *ar, u32 vdev_id,
+ath10k_wmi_beacon_send_ref_nowait(struct ath10k_vif *arvif,
 				  const void *bcn, size_t bcn_len,
 				  u32 bcn_paddr, bool dtim_zero,
 				  bool deliver_cab)
 {
 	struct sk_buff *skb;
 	int ret;
+	struct ath10k *ar = arvif->ar;
 
 	if (!ar->wmi.ops->gen_beacon_dma)
 		return -EOPNOTSUPP;
 
-	skb = ar->wmi.ops->gen_beacon_dma(ar, vdev_id, bcn, bcn_len, bcn_paddr,
+	skb = ar->wmi.ops->gen_beacon_dma(ar, arvif->vdev_id, bcn, bcn_len, bcn_paddr,
 					  dtim_zero, deliver_cab);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 
+	spin_lock_bh(&ar->data_lock);
+	reinit_completion(&arvif->beacon_tx_done);
+	spin_unlock_bh(&ar->data_lock);
+
 	ret = ath10k_wmi_cmd_send_nowait(ar, skb,
 					 ar->wmi.cmd->pdev_send_bcn_cmdid);
 	if (ret) {
+		spin_lock_bh(&ar->data_lock);
+		complete(&arvif->beacon_tx_done);
+		spin_unlock_bh(&ar->data_lock);
 		dev_kfree_skb(skb);
 		return ret;
 	}
@@ -1050,14 +1085,14 @@ ath10k_wmi_pdev_set_wmm_params(struct ath10k *ar,
 }
 
 static inline int
-ath10k_wmi_request_stats(struct ath10k *ar, u32 stats_mask)
+ath10k_wmi_request_stats(struct ath10k *ar, u32 stats_mask, u32 specifier)
 {
 	struct sk_buff *skb;
 
 	if (!ar->wmi.ops->gen_request_stats)
 		return -EOPNOTSUPP;
 
-	skb = ar->wmi.ops->gen_request_stats(ar, stats_mask);
+	skb = ar->wmi.ops->gen_request_stats(ar, stats_mask, specifier);
 	if (IS_ERR(skb))
 		return PTR_ERR(skb);
 

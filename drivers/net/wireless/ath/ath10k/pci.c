@@ -1016,6 +1016,22 @@ static int ath10k_pci_diag_read32(struct ath10k *ar, u32 address, u32 *value)
 	return ret;
 }
 
+static int __ath10k_pci_diag_read_hi_addr(struct ath10k *ar, __le32 *dest,
+					  u32 src)
+{
+	u32 host_addr;
+	int ret;
+
+	host_addr = host_interest_item_address(src);
+
+	ret = ath10k_pci_diag_read32(ar, host_addr, dest);
+	if (ret != 0) {
+		ath10k_warn(ar, "failed to get memcpy hi address for firmware address %d: %d\n",
+			    src, ret);
+	}
+	return ret;
+}
+
 static int __ath10k_pci_diag_read_hi(struct ath10k *ar, void *dest,
 				     u32 src, u32 len)
 {
@@ -1043,6 +1059,9 @@ static int __ath10k_pci_diag_read_hi(struct ath10k *ar, void *dest,
 
 #define ath10k_pci_diag_read_hi(ar, dest, src, len)		\
 	__ath10k_pci_diag_read_hi(ar, dest, HI_ITEM(src), len)
+
+#define ath10k_pci_diag_read_hi_addr(ar, dest, src)		\
+	__ath10k_pci_diag_read_hi_addr(ar, dest, HI_ITEM(src))
 
 int ath10k_pci_diag_write_mem(struct ath10k *ar, u32 address,
 			      const void *data, int nbytes)
@@ -1431,6 +1450,139 @@ u16 ath10k_pci_hif_get_free_queue_number(struct ath10k *ar, u8 pipe)
 	return ath10k_ce_num_free_src_entries(ar_pci->pipe_info[pipe].ce_hdl);
 }
 
+static void ath10k_pci_dump_bss_ram(struct ath10k *ar,
+				    struct ath10k_fw_crash_data *crash_data)
+{
+	int ret;
+
+	if (!crash_data)
+		return;
+
+	lockdep_assert_held(&ar->dump_mutex);
+
+	if (!(ar->running_fw && ar->running_fw->fw_file.ram_bss_addr))
+		return;
+
+	if (!ar->running_fw->fw_file.ram_bss_len)
+		return;
+
+	ret = ath10k_pci_diag_read_mem(ar, ar->running_fw->fw_file.ram_bss_addr,
+				       crash_data->ram_bss_buf,
+				       ar->running_fw->fw_file.ram_bss_len);
+	if (ret)
+		ath10k_warn(ar,
+			    "failed to read firmware RAM BSS memory from %d (%d B): %d\n",
+			    ar->running_fw->fw_file.ram_bss_addr, ar->running_fw->fw_file.ram_bss_len, ret);
+}
+
+static void ath10k_pci_dump_bss_rom(struct ath10k *ar,
+				    struct ath10k_fw_crash_data *crash_data)
+{
+	int ret;
+
+	if (!crash_data)
+		return;
+
+	lockdep_assert_held(&ar->dump_mutex);
+
+	if (!(ar->running_fw && ar->running_fw->fw_file.rom_bss_addr))
+		return;
+
+	if (!ar->running_fw->fw_file.rom_bss_len)
+		return;
+
+	ret = ath10k_pci_diag_read_mem(ar, ar->running_fw->fw_file.rom_bss_addr,
+				       crash_data->rom_bss_buf,
+				       ar->running_fw->fw_file.rom_bss_len);
+	if (ret)
+		ath10k_warn(ar,
+			    "failed to read firmware ROM BSS memory from %d (%d B): %d\n",
+			    ar->running_fw->fw_file.rom_bss_addr, ar->running_fw->fw_file.rom_bss_len, ret);
+}
+
+/* Save the main firmware stack */
+static void ath10k_pci_dump_stack(struct ath10k *ar,
+				  struct ath10k_fw_crash_data *crash_data)
+{
+	if (!crash_data)
+		return;
+
+	lockdep_assert_held(&ar->dump_mutex);
+	BUILD_BUG_ON(ATH10K_FW_STACK_SIZE % 4);
+
+	ath10k_pci_diag_read_hi(ar, crash_data->stack_buf,
+				hi_stack, ATH10K_FW_STACK_SIZE);
+	ath10k_pci_diag_read_hi_addr(ar, &crash_data->stack_addr, hi_stack);
+}
+
+/* Save the exception firmware stack */
+static void ath10k_pci_dump_exc_stack(struct ath10k *ar,
+				      struct ath10k_fw_crash_data *crash_data)
+{
+	if (!crash_data)
+		return;
+
+	lockdep_assert_held(&ar->dump_mutex);
+
+	ath10k_pci_diag_read_hi(ar, crash_data->exc_stack_buf,
+				hi_err_stack, ATH10K_FW_STACK_SIZE);
+
+	ath10k_pci_diag_read_hi_addr(ar, &crash_data->exc_stack_addr,
+				     hi_err_stack);
+}
+
+/* Only CT firmware can do this.  Attempt to read crash dump over pci
+ * registers since normal CE transport is not working.
+ */
+static int ath10k_ct_fw_crash_regs_harder(struct ath10k *ar,
+					  __le32 *reg_dump_values,
+					  int len)
+{
+	u32 val;
+	int i;
+	int q;
+#define MAX_SPIN_TRIES 1000000
+
+	if (!test_bit(ATH10K_FW_FEATURE_PINGPONG_READ_CT,
+		      ar->running_fw->fw_file.fw_features)) {
+		return -EINVAL;
+	}
+
+	ath10k_warn(ar, "in crash-regs-harder\n");
+
+	for (i = 0; i<MAX_SPIN_TRIES; i++) {
+		val = ath10k_pci_read32(ar, FW_INDICATOR_ADDRESS);
+		if (val & FW_IND_SCRATCH2_WR)
+			goto pingpong;
+	}
+
+	ath10k_warn(ar, "in crash-regs-harder, firmware did not provide indicator: 0x%x\n", val);
+	return -EBUSY;
+
+pingpong:
+	ath10k_warn(ar, "Trying to read crash dump over pingpong registers, len %d\n", len);
+	/* Firmware is trying to send us info it seems. */
+	for (q = 0; q<len; q++) {
+		reg_dump_values[q] = ath10k_pci_read32(ar, SOC_CORE_BASE_ADDRESS + SCRATCH_2_ADDRESS);
+		val = ath10k_pci_read32(ar, FW_INDICATOR_ADDRESS);
+		val |= FW_IND_SCRATCH2_RD; /* tell firmware we read it */
+		val &= ~FW_IND_SCRATCH2_WR; /* clear firmware's write flag */
+		ath10k_pci_write32(ar, FW_INDICATOR_ADDRESS, val);
+
+		for (i = 0; i<MAX_SPIN_TRIES; i++) {
+			val = ath10k_pci_read32(ar, FW_INDICATOR_ADDRESS);
+			if (val & FW_IND_SCRATCH2_WR)
+				break;
+		}
+		if (!(val & FW_IND_SCRATCH2_WR)) {
+			ath10k_err(ar, "failed to read reg %i via pingpong method.\n",
+				   q);
+			return 0; // partial read is better than nothing I guess
+		}
+	}
+	return 0;
+}
+
 static void ath10k_pci_dump_registers(struct ath10k *ar,
 				      struct ath10k_fw_crash_data *crash_data)
 {
@@ -1443,8 +1595,62 @@ static void ath10k_pci_dump_registers(struct ath10k *ar,
 				      hi_failure_state,
 				      REG_DUMP_COUNT_QCA988X * sizeof(__le32));
 	if (ret) {
+		__le32 *buffer;
+		int len = 1500; /* length in bytes for firmware dbglog buffer */
+		struct ath10k_fw_dbglog_buf dbuf;
+
 		ath10k_err(ar, "failed to read firmware dump area: %d\n", ret);
-		return;
+
+		/* Try to read this directly over registers...only works on new
+		 * CT firmware.
+		 */
+		ret = ath10k_ct_fw_crash_regs_harder(ar, reg_dump_values, REG_DUMP_COUNT_QCA988X);
+		if (ret)
+			return;
+
+		/* Try to read the debug-log buffers as well. */
+		buffer = kzalloc(len, GFP_ATOMIC);
+
+		if (!buffer)
+			goto free_and_cont;
+
+		if (ath10k_ct_fw_crash_regs_harder(ar, (__le32 *)(&dbuf), sizeof(dbuf)/4))
+			goto free_and_cont;
+
+		/* wow, it worked! */
+		len = le32_to_cpu(dbuf.length);
+		if (len > 1500) {
+			ath10k_err(ar, "dbuf length is greater than 1500: %d\n", len);
+			len = 1500;
+		}
+		if (ath10k_ct_fw_crash_regs_harder(ar, buffer, len/4))
+			goto free_and_cont;
+
+		spin_lock_bh(&ar->data_lock);
+		ath10k_dbg_save_fw_dbg_buffer(ar, buffer, len/4);
+		spin_unlock_bh(&ar->data_lock);
+		ath10k_dbg_print_fw_dbg_buffer(ar, buffer, len/4, KERN_ERR);
+
+		/* See if the second one is available */
+		if (ath10k_ct_fw_crash_regs_harder(ar, (__le32 *)(&dbuf), sizeof(dbuf)/4))
+			goto free_and_cont;
+
+		len = le32_to_cpu(dbuf.length);
+		if (len > 1500) {
+			ath10k_err(ar, "dbuf[2] length is greater than 1500: %d\n", len);
+			len = 1500;
+		}
+
+		if (ath10k_ct_fw_crash_regs_harder(ar, buffer, len/4))
+			goto free_and_cont;
+
+		spin_lock_bh(&ar->data_lock);
+		ath10k_dbg_save_fw_dbg_buffer(ar, buffer, len/4);
+		spin_unlock_bh(&ar->data_lock);
+		ath10k_dbg_print_fw_dbg_buffer(ar, buffer, len/4, KERN_ERR);
+
+	free_and_cont:
+		kfree(buffer);
 	}
 
 	BUILD_BUG_ON(REG_DUMP_COUNT_QCA988X % 4);
@@ -1604,11 +1810,22 @@ static int ath10k_pci_dump_memory_reg(struct ath10k *ar,
 {
 	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
 	u32 i;
+	int ret;
+
+	mutex_lock(&ar->conf_mutex);
+	if (ar->state != ATH10K_STATE_ON) {
+		ath10k_warn(ar, "Skipping pci_dump_memory_reg invalid state\n");
+		ret = -EIO;
+		goto done;
+	}
 
 	for (i = 0; i < region->len; i += 4)
 		*(u32 *)(buf + i) = ioread32(ar_pci->mem + region->start + i);
 
-	return region->len;
+	ret = region->len;
+done:
+	mutex_unlock(&ar->conf_mutex);
+	return ret;
 }
 
 /* if an error happened returns < 0, otherwise the length */
@@ -1704,7 +1921,11 @@ static void ath10k_pci_dump_memory(struct ath10k *ar,
 			count = ath10k_pci_dump_memory_sram(ar, current_region, buf);
 			break;
 		case ATH10K_MEM_REGION_TYPE_IOREG:
-			count = ath10k_pci_dump_memory_reg(ar, current_region, buf);
+			ret = ath10k_pci_dump_memory_reg(ar, current_region, buf);
+			if (ret < 0)
+				break;
+
+			count = ret;
 			break;
 		default:
 			ret = ath10k_pci_dump_memory_generic(ar, current_region, buf);
@@ -1728,6 +1949,105 @@ static void ath10k_pci_dump_memory(struct ath10k *ar,
 
 		current_region++;
 	}
+}
+
+/**
+ * Read any not-yet-delivered debug-log buffers on the target
+ * and save them to storage in the host driver.  Typically
+ * only done on crash, as firmware will normally deliver
+ * logs periodically on its own if it is functioning
+ * properly.
+ */
+static void ath10k_pci_dump_dbglog(struct ath10k *ar)
+{
+	struct ath10k_fw_dbglog_hdr dbg_hdr;
+	u32 dbufp; /* pointer in target memory space */
+	struct ath10k_fw_dbglog_buf dbuf;
+	u8 *buffer;
+	int ret;
+	int i;
+	int len;
+
+	ret = ath10k_pci_diag_read_hi(ar, &dbg_hdr, hi_dbglog_hdr,
+				      sizeof(dbg_hdr));
+	if (ret != 0) {
+		ath10k_err(ar, "failed to dump debug log area: %d\n", ret);
+		return;
+	}
+
+	ath10k_warn(ar, "debug log header, dbuf: 0x%x  dropped: %i\n",
+		    le32_to_cpu(dbg_hdr.dbuf), le32_to_cpu(dbg_hdr.dropped));
+	dbufp = le32_to_cpu(dbg_hdr.dbuf);
+
+	/* i is for logging purposes and sanity check in case firmware buffers
+	 * are corrupted and will not properly terminate the list.
+	 * In standard firmware, it appears there are no more than 2
+	 * buffers, so 10 should be safe upper limit even if firmware
+	 * changes quite a bit.
+	 */
+	i = 0;
+	while (dbufp && i < 10) {
+		ret = ath10k_pci_diag_read_mem(ar, dbufp, &dbuf, sizeof(dbuf));
+		if (ret != 0) {
+			ath10k_err(ar, "failed to read debug log area: %d (addr 0x%x)\n",
+				   ret, dbufp);
+			return;
+		}
+
+		len = le32_to_cpu(dbuf.length);
+
+		ath10k_warn(ar, "[%i] next: 0x%x buf: 0x%x sz: %i len: %i count: %i free: %i\n",
+			    i, le32_to_cpu(dbuf.next), le32_to_cpu(dbuf.buffer),
+			    le32_to_cpu(dbuf.bufsize), len,
+			    le32_to_cpu(dbuf.count), le32_to_cpu(dbuf.free));
+		if (dbuf.buffer == 0 || len == 0)
+			goto next;
+
+		/* Pick arbitrary upper bound in case firmware is corrupted for
+		 * whatever reason.
+		 */
+		if (len > 4096) {
+			ath10k_err(ar,
+				   "debuglog buf length is out of bounds: %d\n",
+				   len);
+			/* Do not trust the next pointer either... */
+			return;
+		}
+
+		buffer = kmalloc(len, GFP_ATOMIC);
+
+		if (!buffer)
+			goto next;
+
+		ret = ath10k_pci_diag_read_mem(ar, le32_to_cpu(dbuf.buffer),
+					       buffer, len);
+		if (ret != 0) {
+			ath10k_err(ar, "failed to read debug log buffer: %d (addr 0x%x)\n",
+				   ret, le32_to_cpu(dbuf.buffer));
+			kfree(buffer);
+			return;
+		}
+
+		WARN_ON(len & 0x3);
+
+		spin_lock_bh(&ar->data_lock);
+		ath10k_dbg_save_fw_dbg_buffer(ar, (__le32 *)(buffer), len >> 2);
+		spin_unlock_bh(&ar->data_lock);
+		ath10k_dbg_print_fw_dbg_buffer(ar, (__le32 *)(buffer),
+					       len / sizeof(__le32),
+					       KERN_ERR);
+		kfree(buffer);
+
+next:
+		dbufp = le32_to_cpu(dbuf.next);
+		if (dbufp == le32_to_cpu(dbg_hdr.dbuf)) {
+			/* It is a circular buffer it seems, bail if next
+			 * is head
+			 */
+			break;
+		}
+		i++;
+	} /* While we have a debug buffer to read */
 }
 
 static void ath10k_pci_fw_dump_work(struct work_struct *work)
@@ -1756,6 +2076,11 @@ static void ath10k_pci_fw_dump_work(struct work_struct *work)
 	ath10k_pci_dump_registers(ar, crash_data);
 	ath10k_ce_dump_registers(ar, crash_data);
 	ath10k_pci_dump_memory(ar, crash_data);
+	ath10k_pci_dump_dbglog(ar);
+	ath10k_pci_dump_stack(ar, crash_data);
+	ath10k_pci_dump_exc_stack(ar, crash_data);
+	ath10k_pci_dump_bss_ram(ar, crash_data);
+	ath10k_pci_dump_bss_rom(ar, crash_data);
 
 	mutex_unlock(&ar->dump_mutex);
 
@@ -1941,6 +2266,7 @@ static int ath10k_pci_hif_start(struct ath10k *ar)
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot hif start\n");
 
 	napi_enable(&ar->napi);
+	ar->napi_enabled = true;
 
 	ath10k_pci_irq_enable(ar);
 	ath10k_pci_rx_post(ar);
@@ -2057,8 +2383,29 @@ static void ath10k_pci_hif_stop(struct ath10k *ar)
 
 	ath10k_pci_irq_disable(ar);
 	ath10k_pci_irq_sync(ar);
-	napi_synchronize(&ar->napi);
-	napi_disable(&ar->napi);
+
+	/* Calling napi_disable twice in a row (w/out starting it and/or without
+	 * having NAPI active leads to deadlock because napi_disable sets
+	 * NAPI_STATE_SCHED and NAPI_STATE_NPSVC when it returns, as far as I
+	 * can tell.  So, guard this call to napi_disable.  I believe the
+	 * failure case is something like this:
+	 * rmmod ath10k_pci ath10k_core
+	 *   Firmware crashes before hif_stop is called by the rmmod path
+	 *   The crash handling logic calls hif_stop
+         *   Then rmmod gets around to calling hif_stop, but spins endlessly
+	 *   in napi_synchronize.
+	 *
+	 *  I think one way this could happen is that ath10k_stop checks
+	 *  for state != ATH10K_STATE_OFF, but STATE_RESTARTING is also
+	 *  a possibility.  That might be how we can have hif_stop called twice
+	 *  without a hif_start in between. --Ben
+	 */
+	if (ar->napi_enabled) {
+		napi_synchronize(&ar->napi);
+		napi_disable(&ar->napi);
+		ar->napi_enabled = false;
+	}
+	cancel_work_sync(&ar_pci->dump_work);
 
 	/* Most likely the device has HTT Rx ring configured. The only way to
 	 * prevent the device from accessing (and possible corrupting) host
@@ -2796,14 +3143,25 @@ static int ath10k_pci_hif_power_up(struct ath10k *ar,
 				   enum ath10k_firmware_mode fw_mode)
 {
 	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
+	struct pci_dev *pdev = ar_pci->pdev;
 	int ret;
+	u32 val;
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot hif power up\n");
 
-	pcie_capability_read_word(ar_pci->pdev, PCI_EXP_LNKCTL,
+	if (ar->dev_id == QCA988X_2_0_DEVICE_ID) {
+		pci_read_config_dword(pdev, 0x70c, &val);
+		if ((val & 0xff000000) == 0x17000000) {
+			val &= 0x00ffffff;
+			val |= 0x27000000;
+			pci_write_config_dword(pdev, 0x570c, val);
+		}
+	} else {
+		pcie_capability_read_word(ar_pci->pdev, PCI_EXP_LNKCTL,
 				  &ar_pci->link_ctl);
-	pcie_capability_write_word(ar_pci->pdev, PCI_EXP_LNKCTL,
+		pcie_capability_write_word(ar_pci->pdev, PCI_EXP_LNKCTL,
 				   ar_pci->link_ctl & ~PCI_EXP_LNKCTL_ASPMC);
+	}
 
 	/*
 	 * Bring the target up cleanly.
@@ -2819,6 +3177,8 @@ static int ath10k_pci_hif_power_up(struct ath10k *ar,
 	if (ret) {
 		if (ath10k_pci_has_fw_crashed(ar)) {
 			ath10k_warn(ar, "firmware crashed during chip reset\n");
+			set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
+			wake_up(&ar->wmi.tx_credits_wq);
 			ath10k_pci_fw_crashed_clear(ar);
 			ath10k_pci_fw_crashed_dump(ar);
 		}
@@ -2845,10 +3205,13 @@ static int ath10k_pci_hif_power_up(struct ath10k *ar,
 		goto err_ce;
 	}
 
+	ar->fw_powerup_failed = false;
+
 	return 0;
 
 err_ce:
 	ath10k_pci_ce_deinit(ar);
+	ar->fw_powerup_failed = true;
 
 err_sleep:
 	return ret;
@@ -3065,6 +3428,7 @@ static const struct ath10k_hif_ops ath10k_pci_hif_ops = {
 	.power_down		= ath10k_pci_hif_power_down,
 	.read32			= ath10k_pci_read32,
 	.write32		= ath10k_pci_write32,
+	.fw_crashed_dump        = ath10k_pci_fw_crashed_dump,
 	.suspend		= ath10k_pci_hif_suspend,
 	.resume			= ath10k_pci_hif_resume,
 	.fetch_cal_eeprom	= ath10k_pci_hif_fetch_cal_eeprom,
@@ -3082,6 +3446,9 @@ static irqreturn_t ath10k_pci_interrupt_handler(int irq, void *arg)
 	int ret;
 
 	if (ath10k_pci_has_device_gone(ar))
+		return IRQ_NONE;
+
+	if (!ar->hif_running)
 		return IRQ_NONE;
 
 	ret = ath10k_pci_force_wake(ar);
@@ -3107,6 +3474,8 @@ static int ath10k_pci_napi_poll(struct napi_struct *ctx, int budget)
 	int done = 0;
 
 	if (ath10k_pci_has_fw_crashed(ar)) {
+		set_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
+		wake_up(&ar->wmi.tx_credits_wq);
 		ath10k_pci_fw_crashed_clear(ar);
 		ath10k_pci_fw_crashed_dump(ar);
 		napi_complete(ctx);
@@ -3482,8 +3851,8 @@ static const struct ath10k_bus_ops ath10k_pci_bus_ops = {
 	.get_num_banks	= ath10k_pci_get_num_banks,
 };
 
-static int ath10k_pci_probe(struct pci_dev *pdev,
-			    const struct pci_device_id *pci_dev)
+static int __ath10k_pci_probe(struct pci_dev *pdev,
+			      const struct pci_device_id *pci_dev)
 {
 	int ret = 0;
 	struct ath10k *ar;
@@ -3494,6 +3863,9 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 	int (*pci_soft_reset)(struct ath10k *ar);
 	int (*pci_hard_reset)(struct ath10k *ar);
 	u32 (*targ_cpu_to_ce_addr)(struct ath10k *ar, u32 addr);
+
+	printk(KERN_INFO "ath10k 5.4 driver, optimized for CT firmware, probing pci device: 0x%x.\n",
+	       pci_dev->device);
 
 	switch (pci_dev->device) {
 	case QCA988X_2_0_DEVICE_ID_UBNT:
@@ -3680,6 +4052,22 @@ err_core_destroy:
 
 	return ret;
 }
+
+static int ath10k_pci_probe(struct pci_dev *pdev,
+			    const struct pci_device_id *pci_dev)
+{
+	int cnt = 0;
+	int rv;
+	do {
+		rv = __ath10k_pci_probe(pdev, pci_dev);
+		if (rv == 0)
+			return rv;
+		pr_err("ath10k: failed to probe PCI : %d, retry-count: %d\n", rv, cnt);
+		mdelay(10); /* let the ath10k firmware gerbil take a small break */
+	} while (cnt++ < 10);
+	return rv;
+}
+
 
 static void ath10k_pci_remove(struct pci_dev *pdev)
 {

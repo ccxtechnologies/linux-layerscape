@@ -43,12 +43,18 @@
 /* Antenna noise floor */
 #define ATH10K_DEFAULT_NOISE_FLOOR -95
 
+#define ATH10K_CT_TX_BEACON_INVALID_RATE_CODE 0xff
 #define ATH10K_INVALID_RSSI 128
 
-#define ATH10K_MAX_NUM_MGMT_PENDING 128
+/* This used to be 128, but klukonin reports increasing this helps in at least
+ * some cases.  I think at worst this could increase mem usage and mgt traffic
+ * latency, but maybe that is worth the tradeoff.  Increasing to 512 per his suggestion.
+ * --Ben
+ */
+#define ATH10K_MAX_NUM_MGMT_PENDING 512
 
 /* number of failed packets (20 packets with 16 sw reties each) */
-#define ATH10K_KICKOUT_THRESHOLD (20 * 16)
+#define DEFAULT_ATH10K_KICKOUT_THRESHOLD (20 * 16)
 
 /*
  * Use insanely high numbers to make sure that the firmware implementation
@@ -81,6 +87,9 @@
 
 /* Default Airtime weight multipler (Tuned for multiclient performance) */
 #define ATH10K_AIRTIME_WEIGHT_MULTIPLIER  4
+
+// TODO-BEN:  Remove this and fix all instances of vif_to_arvif.
+#define ath10k_vif_to_arvif(a) (void*)(a->drv_priv)
 
 struct ath10k;
 
@@ -180,6 +189,10 @@ struct ath10k_wmi {
 	u32 num_mem_chunks;
 	u32 rx_decap_mode;
 	struct ath10k_mem_chunk mem_chunks[WMI_MAX_MEM_REQS];
+
+	int gen_buf_len; /* so far */
+	u8 gen_buffer[2048]; /* Not clear what is true max size */
+	struct wmi_generic_buffer_event last_generic_event;
 };
 
 struct ath10k_fw_stats_peer {
@@ -190,6 +203,7 @@ struct ath10k_fw_stats_peer {
 	u32 peer_tx_rate;
 	u32 peer_rx_rate; /* 10x only */
 	u64 rx_duration;
+	u64 pn; /* CT Wave-2 FW Only, special restrictions apply */
 };
 
 struct ath10k_fw_extd_stats_peer {
@@ -216,6 +230,8 @@ struct ath10k_fw_stats_vdev {
 	u32 num_tx_not_acked;
 	u32 tx_rate_history[10];
 	u32 beacon_rssi_history[10];
+
+	u64 tsf64; /* ct fw only */
 };
 
 struct ath10k_fw_stats_vdev_extd {
@@ -308,6 +324,12 @@ struct ath10k_fw_stats_pdev {
 	s32 phy_err_drop;
 	s32 mpdu_errs;
 	s32 rx_ovfl_errs;
+	s32 rx_timeout_errs;
+
+	/* Other PDEV stats */
+	s32 dram_free;
+	s32 iram_free;
+	s32 sram_free;
 };
 
 struct ath10k_fw_stats {
@@ -316,6 +338,39 @@ struct ath10k_fw_stats {
 	struct list_head vdevs;
 	struct list_head peers;
 	struct list_head peers_extd;
+
+	/* Register and related dump, CT firmware only. */
+	int extras_count; /* How many extras do we have assigned? */
+	u32 mac_filter_addr_l32;
+	u32 mac_filter_addr_u16;
+	u32 dcu_slot_time;
+	u32 phy_bb_mode_select;
+	u32 pcu_bssid_l32;
+	u32 pcu_bssid_u16;
+	u32 pcu_bssid2_l32;
+	u32 pcu_bssid2_u16;
+	u32 pcu_sta_addr_l32;
+	u32 pcu_sta_addr_u16;
+	u32 mac_dma_cfg;
+	u32 mac_dma_txcfg;
+	u32 pcu_rxfilter;
+	u32 phy_bb_gen_controls;
+	u32 dma_imr;
+	u32 dma_txrx_imr;
+	u32 sw_powermode;
+	u16 sw_chainmask_tx;
+	u16 sw_chainmask_rx;
+	u32 sw_opmode;
+	u32 sw_rxfilter;
+	u32 short_retries; // RTS packet retries
+	u32 long_retries; // Data packet retries
+	u32 adc_temp; /* ADC Temperature readings, one octet for each chain.
+		       * Value of 0x78 for 2,3 means not-read/not-active,
+		       * and 0x7B for 0,1 mean means the same.
+		       */
+	u32 nfcal; /* per-chain noise-floor calibration, signed 8 bit nums
+		    * packed into u32 */
+	u32 extra_regs[20]; /* for forward-compat */
 };
 
 #define ATH10K_TPC_TABLE_TYPE_FLAG	1
@@ -525,6 +580,7 @@ enum ath10k_beacon_state {
 
 struct ath10k_vif {
 	struct list_head list;
+	struct completion beacon_tx_done;
 
 	u32 vdev_id;
 	u16 peer_id;
@@ -572,10 +628,32 @@ struct ath10k_vif {
 	} u;
 
 	bool use_cts_prot;
-	bool nohwcrypt;
+	bool nohwcrypt; /* actual setting, based on firmware abilities, etc. */
 	int num_legacy_stations;
 	int txpower;
 	bool ftm_responder;
+
+	/* TX Rate overrides, CT FW only at this time, and only wave-2 has full support */
+	bool txo_active;
+	u8 txo_tpc;
+	u8 txo_sgi;
+	u8 txo_mcs;
+	u8 txo_nss;
+	u8 txo_pream;
+	u8 txo_retries;
+	u8 txo_dynbw;
+	u8 txo_bw;
+	u8 txo_rix; /* wave-1 only */
+
+	/* Firmware allows configuring rate of each of these traffic types.
+	 * 0xFF will mean value has not been set by user, and in that case,
+	 * we will auto-adjust the rates based on the legacy rate mask.
+	 **/
+	/* TODO-BEN:  This may conflict with upstream code? */
+	u8 mcast_rate[NUM_NL80211_BANDS];
+	u8 bcast_rate[NUM_NL80211_BANDS];
+	u8 mgt_rate[NUM_NL80211_BANDS];
+
 	struct wmi_wmm_params_all_arg wmm_params;
 	struct work_struct ap_csa_work;
 	struct delayed_work connection_loss_work;
@@ -608,6 +686,26 @@ struct ath10k_ce_crash_hdr {
 
 #define MAX_MEM_DUMP_TYPE	5
 
+/* This will store at least the last 128 entries.  Each dbglog message
+ * is a max of 7 32-bit integers in length, but the length can be less
+ * than that as well.
+ */
+#define ATH10K_DBGLOG_DATA_LEN (128 * 7)
+struct ath10k_dbglog_entry_storage {
+	u32 head_idx; /* Where to write next chunk of data */
+	u32 tail_idx; /* Index of first msg */
+	__le32 data[ATH10K_DBGLOG_DATA_LEN];
+};
+
+/* Just enough info to decode firmware debug-log argument length */
+#define DBGLOG_NUM_ARGS_OFFSET           26
+#define DBGLOG_NUM_ARGS_MASK             0xFC000000 /* Bit 26-31 */
+#define DBGLOG_NUM_ARGS_MAX              5 /* firmware tool chain limit */
+
+/* estimated values, hopefully these are enough */
+#define ATH10K_ROM_BSS_BUF_LEN 30000
+#define ATH10K_RAM_BSS_BUF_LEN 55000
+
 /* used for crash-dump storage, protected by data-lock */
 struct ath10k_fw_crash_data {
 	guid_t guid;
@@ -617,11 +715,20 @@ struct ath10k_fw_crash_data {
 
 	u8 *ramdump_buf;
 	size_t ramdump_buf_len;
+	__le32 stack_buf[ATH10K_FW_STACK_SIZE / sizeof(__le32)];
+	__le32 exc_stack_buf[ATH10K_FW_STACK_SIZE / sizeof(__le32)];
+	__le32 stack_addr;
+	__le32 exc_stack_addr;
+	__le32 rom_bss_buf[ATH10K_ROM_BSS_BUF_LEN / sizeof(__le32)];
+	__le32 ram_bss_buf[ATH10K_RAM_BSS_BUF_LEN / sizeof(__le32)];
 };
 
 struct ath10k_debug {
 	struct dentry *debugfs_phy;
 
+	struct ath10k_rx_reorder_stats rx_reorder_stats;
+	struct ath10k_pdev_ext_stats_ct pdev_ext_stats;
+	s32 nf_sum[4]; /* sum of all chains, reported by pdev_ext_stats */
 	struct ath10k_fw_stats fw_stats;
 	struct completion fw_stats_complete;
 	bool fw_stats_done;
@@ -629,6 +736,7 @@ struct ath10k_debug {
 	unsigned long htt_stats_mask;
 	unsigned long reset_htt_stats;
 	struct delayed_work htt_stats_dwork;
+	struct delayed_work nop_dwork;
 	struct ath10k_dfs_stats dfs_stats;
 	struct ath_dfs_pool_stats dfs_pool_stats;
 
@@ -646,6 +754,33 @@ struct ath10k_debug {
 	void *cal_data;
 	u32 enable_extd_tx_stats;
 	u8 fw_dbglog_mode;
+	u32 nop_id;
+
+	struct ath10k_dbglog_entry_storage dbglog_entry_data;
+
+	/* These counters are kept in software. */
+	u64 rx_bytes; /* counter, total received bytes */
+	u32 rx_drop_unchain_oom; /* AMSDU Dropped due to un-chain OOM case */
+	u32 rx_drop_decap_non_raw_chained;
+	u32 rx_drop_no_freq;
+	u32 rx_drop_cac_running;
+
+	u32 tx_ok; /* counter, OK tx status count. */
+	u32 tx_noack; /* counter, no-ack tx status count. */
+	u32 tx_discard; /* counter, discard tx status count. */
+	u64 tx_ok_bytes;
+	u64 tx_noack_bytes;
+	u64 tx_discard_bytes;
+	u64 tx_bytes; /* counter, total sent to firmware */
+	char dfs_last_msg[120];
+
+	int ratepwr_tbl_len;
+	struct qc988xxEepromRateTbl ratepwr_tbl;
+	struct completion ratepwr_tbl_complete;
+
+	int powerctl_tbl_len;
+	struct qca9880_power_ctrl powerctl_tbl;
+	struct completion powerctl_tbl_complete;
 };
 
 enum ath10k_state {
@@ -779,6 +914,90 @@ enum ath10k_fw_features {
 	/* Firmware allows setting peer fixed rate */
 	ATH10K_FW_FEATURE_PEER_FIXED_RATE = 21,
 
+	/* tx-status has the noack bits (CT firmware version 14 and higher ) */
+	ATH10K_FW_FEATURE_HAS_TXSTATUS_NOACK = 30,
+
+	/* Firmware from Candela Technologies, enables more VIFs, etc */
+	ATH10K_FW_FEATURE_WMI_10X_CT = 31,
+
+	/* Firmware from Candela Technologies with rx-software-crypt.
+	 * Required for multiple stations connected to same AP when using
+	 * encryption (ie, commercial version of CT firmware) */
+	ATH10K_FW_FEATURE_CT_RXSWCRYPT = 32,
+
+	/* Firmware supports extended wmi_common_peer_assoc_complete_cmd that contains
+	 * an array of rate-disable masks.  This allows the host to have better control
+	 * over what rates the firmware will use.  CT Firmware only (v15 and higher)
+	 */
+	ATH10K_FW_FEATURE_CT_RATEMASK = 33,
+
+	/* Versions of firmware before approximately 10.2.4.72 would corrupt txop fields
+	 * during burst.  Since this is fixed now, add a flag to denote this.
+	 */
+	ATH10K_FW_FEATURE_HAS_SAFE_BURST = 34,
+
+	/* Register-dump is supported. */
+	ATH10K_FW_FEATURE_REGDUMP_CT = 35,
+
+	/* TX-Rate is reported. */
+	ATH10K_FW_FEATURE_TXRATE_CT = 36,
+
+	/* Firmware can flush all peers. */
+	ATH10K_FW_FEATURE_FLUSH_ALL_CT = 37,
+
+	/* Firmware can read memory with ping-pong protocol. */
+	ATH10K_FW_FEATURE_PINGPONG_READ_CT = 38,
+
+	/* Firmware can skip channel reservation. */
+	ATH10K_FW_FEATURE_SKIP_CH_RES_CT = 39,
+
+	/* Firmware supports NOPcan skip channel reservation. */
+	ATH10K_FW_FEATURE_NOP_CT = 40,
+
+	/* Firmware supports CT HTT MGT feature. */
+	ATH10K_FW_FEATURE_HTT_MGT_CT = 41,
+
+	/* Set-special cmd-id is supported. */
+	ATH10K_FW_FEATURE_SET_SPECIAL_CT = 42,
+
+	/* SW Beacon Miss is disabled in this kernel, so you have to
+	 * let mac80211 manage the connection.
+	 */
+	ATH10K_FW_FEATURE_NO_BMISS_CT = 43,
+
+	/* 10.1 firmware that supports getting temperature.  Stock
+	 * 10.1 cannot.
+	 */
+	ATH10K_FW_FEATURE_HAS_GET_TEMP_CT = 44,
+
+	/* Can peer-id be over-ridden to provide rix + retries for raw pkts?
+	 *  CT only option.
+	 */
+	ATH10K_FW_FEATURE_HAS_TX_RC_CT = 45,
+
+	/* Do we support requesting custom stats */
+	ATH10K_FW_FEATURE_CUST_STATS_CT = 46,
+
+	/* Can the firmware handle a retry limit greater than 2? */
+	ATH10K_FW_FEATURE_RETRY_GT2_CT = 47,
+
+	/* Can the firmware handle CT station feature, sort of like proxy-sta */
+	ATH10K_FW_FEATURE_CT_STA = 48,
+
+	/* TX-Rate v2 is reported. */
+	ATH10K_FW_FEATURE_TXRATE2_CT = 49,
+
+	/* Firmware will send a beacon-tx-callback message so driver knows when
+	 * beacon buffer can be released.
+	 */
+	ATH10K_FW_FEATURE_BEACON_TX_CB_CT = 50,
+
+	ATH10K_FW_FEATURE_RESERVED_CT = 51, /* reserved by out-of-tree feature */
+
+	ATH10K_FW_FEATURE_CONSUME_BLOCK_ACK_CT = 52, /* firmware can accept decrypted rx block-ack over WMI */
+
+	ATH10K_FW_FEATURE_HAS_BCN_RC_CT = 53, /* firmware can accept ppdu (tx-rate) info in beacon-tx-by-ref wmi cmd */
+
 	/* keep last */
 	ATH10K_FW_FEATURE_COUNT,
 };
@@ -875,6 +1094,8 @@ enum ath10k_tx_pause_reason {
 
 struct ath10k_fw_file {
 	const struct firmware *firmware;
+	char fw_name[100];
+	char fw_board_name[100];
 
 	char fw_version[ETHTOOL_FWVERS_LEN];
 
@@ -891,6 +1112,14 @@ struct ath10k_fw_file {
 
 	const void *codeswap_data;
 	size_t codeswap_len;
+
+	/* These are written to only during first firmware load from user
+	 * space so no need for any locking.
+	 */
+	u32 ram_bss_addr;
+	u32 ram_bss_len;
+	u32 rom_bss_addr;
+	u32 rom_bss_len;
 
 	/* The original idea of struct ath10k_fw_file was that it only
 	 * contains struct firmware and pointers to various parts (actual
@@ -947,12 +1176,17 @@ struct ath10k {
 	struct device *dev;
 	u8 mac_addr[ETH_ALEN];
 
+	struct ieee80211_iface_combination if_comb[8];
+
 	enum ath10k_hw_rev hw_rev;
 	u16 dev_id;
+	bool ok_tx_rate_status; /* Firmware is sending tx-rate status?  (CT only) */
+	bool fw_powerup_failed; /* If true, might take reboot to recover. */
 	u32 chip_id;
 	enum ath10k_dev_type dev_type;
 	u32 target_version;
 	u8 fw_version_major;
+	bool use_swcrypt; /* Firmware (and driver) supports rx-sw-crypt? */
 	u32 fw_version_minor;
 	u16 fw_version_release;
 	u16 fw_version_build;
@@ -974,7 +1208,9 @@ struct ath10k {
 
 	bool nlo_enabled;
 	bool p2p;
+	bool ct_all_pkts_htt; /* CT firmware only: native-wifi for all pkts */
 
+	bool hif_running; /* Should we be processing IRQs or not? */
 	struct {
 		enum ath10k_bus bus;
 		const struct ath10k_hif_ops *ops;
@@ -1003,6 +1239,58 @@ struct ath10k {
 
 	const struct firmware *pre_cal_file;
 	const struct firmware *cal_file;
+
+	const struct firmware *fwcfg_file;
+	struct {
+#define ATH10K_FWCFG_FWVER          (1<<0)
+#define ATH10K_FWCFG_VDEVS          (1<<1)
+#define ATH10K_FWCFG_PEERS          (1<<2)
+#define ATH10K_FWCFG_STATIONS       (1<<3)
+#define ATH10K_FWCFG_NOHWCRYPT      (1<<4)
+#define ATH10K_FWCFG_RATE_CTRL_OBJS (1<<5)
+#define ATH10K_FWCFG_TX_DESC        (1<<6)
+#define ATH10K_FWCFG_MAX_NSS        (1<<7)
+#define ATH10K_FWCFG_NUM_TIDS       (1<<8)
+#define ATH10K_FWCFG_ACTIVE_PEERS   (1<<9)
+#define ATH10K_FWCFG_SKID_LIMIT     (1<<10)
+#define ATH10K_FWCFG_REGDOM         (1<<11)
+#define ATH10K_FWCFG_BMISS_VDEVS    (1<<12)
+#define ATH10K_FWCFG_MAX_AMSDUS     (1<<13)
+#define ATH10K_FWCFG_NOBEAMFORM_MU  (1<<14)
+#define ATH10K_FWCFG_NOBEAMFORM_SU  (1<<15)
+#define ATH10K_FWCFG_CT_STA         (1<<16)
+#define ATH10K_FWCFG_ALLOW_ALL_MCS  (1<<17)
+#define ATH10K_FWCFG_DMA_BURST      (1<<18)
+
+		u32 flags; /* let us know which fields have been set */
+		char calname[100];
+		char fwname[100];
+		char bname[100]; /* board file name */
+		char bname_ext[100]; /* extended board file name */
+		u32 fwver;
+		u32 vdevs;
+		u32 stations;
+		u32 peers;
+		u32 nohwcrypt;
+		u32 ct_sta_mode;
+		u32 nobeamform_mu;
+		u32 nobeamform_su;
+		u32 rate_ctrl_objs;
+		u32 tx_desc; /* max_num_pending_tx descriptors */
+		u32 max_nss; /* max_spatial_stream */
+		u32 num_tids;
+		u32 active_peers;
+		u32 skid_limit;
+		int regdom;
+		u32 bmiss_vdevs; /* To disable, set to 0 */
+		u32 max_amsdus;
+		u32 allow_all_mcs;
+		u32 dma_burst; /* 0:  64b or maybe 128b or maybe 'raw'.  1:  256b.  I don't have
+				* enough docs to know exactly what this means.  See 76d164f582150fd0259ec0fcbc485470bcd8033e
+				* and the thing that reverts that.  This fwcfg option allows the user to over-ride this
+				* since it seems that 0 works best on some systems and 1 works best on others.
+				*/
+	} fwcfg;
 
 	struct {
 		u32 vendor;
@@ -1061,10 +1349,12 @@ struct ath10k {
 	unsigned int filter_flags;
 	unsigned long dev_flags;
 	bool dfs_block_radar_events;
+	int install_key_rv; /* Store error code from key-install */
 
 	/* protected by conf_mutex */
 	bool radar_enabled;
 	int num_started_vdevs;
+	u32 sta_xretry_kickout_thresh;
 
 	/* Protected by conf-mutex */
 	u8 cfg_tx_chainmask;
@@ -1104,6 +1394,15 @@ struct ath10k {
 	int max_num_tdls_vdevs;
 	int num_active_peers;
 	int num_tids;
+	bool request_ct_sta;    /* desired setting */
+	bool request_nohwcrypt; /* desired setting */
+	bool request_nobeamform_mu;
+	bool request_nobeamform_su;
+	u32 num_ratectrl_objs;
+	u32 skid_limit;
+	u32 bmiss_offload_max_vdev;
+	int eeprom_regdom;
+	bool eeprom_regdom_warned;
 
 	struct work_struct svc_rdy_work;
 	struct sk_buff *svc_rdy_skb;
@@ -1141,6 +1440,10 @@ struct ath10k {
 
 	unsigned long tx_paused; /* see ATH10K_TX_PAUSE_ */
 
+	u32 last_wmi_cmds[4];
+	u32 last_wmi_jiffies[4];
+	u32 last_wmi_cmd_idx;
+
 #ifdef CONFIG_ATH10K_DEBUGFS
 	struct ath10k_debug debug;
 	struct {
@@ -1152,6 +1455,9 @@ struct ath10k {
 		struct ath10k_spec_scan config;
 	} spectral;
 #endif
+	u32 wmi_get_temp_count;
+
+	u32 eeprom_configAddrs[24]; /* Store sticky eeprom register settings to re-apply after OTP */
 
 	u32 pktlog_filter;
 
@@ -1183,6 +1489,9 @@ struct ath10k {
 	/* NAPI */
 	struct net_device napi_dev;
 	struct napi_struct napi;
+	bool napi_enabled;
+
+	struct work_struct stop_scan_work;
 
 	struct work_struct set_coverage_class_work;
 	/* protected by conf_mutex */
@@ -1210,6 +1519,58 @@ struct ath10k {
 	struct work_struct radar_confirmation_work;
 	struct ath10k_bus_params bus_param;
 	struct completion peer_delete_done;
+
+	/* Index 0 is for 5Ghz, index 1 is for 2.4Ghz, CT firmware only. */
+	/* be sure to flush this to firmware after resets */
+	/* Includes various other backdoor hacks as well. */
+	struct {
+		struct {
+#define MIN_CCA_PWR_COUNT 3
+			u16 minCcaPwrCT[MIN_CCA_PWR_COUNT]; /* 0 means don't-set */
+			u8 noiseFloorThresh; /* 0 means don't-set */
+			/* Have to set this to 2 before minCcaPwr settings will be active.
+			 * Values:  0  don't-set, 1 disable, 2 enable
+			 */
+			u8 enable_minccapwr_thresh;
+		} bands[2];
+		u8 thresh62_ext;
+		u8 rc_rate_max_per_thr; /* Firmware rate-ctrl alg. tuning. */
+		u8 tx_sta_bw_mask; /* 0:  all, 0x1: 20Mhz, 0x2 40Mhz, 0x4 80Mhz */
+		bool tx_hang_cold_reset_ok;
+		bool allow_ibss_amsdu;
+		bool rifs_enable_override;
+		bool coverage_already_set;
+		bool txbf_cv_msg;
+		bool rx_all_mgt;
+		bool apply_board_power_ctl_table;
+		u8 disable_ibss_cca;
+		u8 peer_stats_pn;
+		u8 rc_txbf_probe;
+#define CT_DISABLE_20MHZ  0x1
+#define CT_DISABLE_40MHZ  0x2
+#define CT_DISABLE_80MHZ  0x4
+#define CT_DISABLE_160MHZ 0x8
+		u16 rate_bw_disable_mask;
+		u16 max_txpower;
+		u16 pdev_xretry_th; /* Max failed retries before wifi chip is reset, 10.1 firmware default is 0x40 */
+		u16 tx_debug;
+		u16 rc_debug;
+		u32 wmi_wd_keepalive_ms; /* 0xFFFFFFFF means disable, otherwise, FW will assert after X ms of not receiving
+					  * a NOP keepalive from the driver.  Suggested value is 0xFFFFFFFF, or 8000+.
+					  * 0 means use whatever firmware defaults to (probably 8000).
+					  * Units are actually 1/1024 of a second, but pretty close to ms, at least.
+					  */
+		u32 ct_pshack;
+		u32 ct_csi;
+		u32 reg_ack_cts;
+		u32 reg_ifs_slot;
+		u32 mu_sounding_timer_ms;
+		u32 su_sounding_timer_ms;
+	} eeprom_overrides;
+
+	/* CSI report accumulator. */
+	u8 csi_data[4096];
+	u16 csi_data_len;
 
 	/* must be last */
 	u8 drv_priv[0] __aligned(sizeof(void *));
@@ -1246,5 +1607,9 @@ int ath10k_core_register(struct ath10k *ar,
 void ath10k_core_unregister(struct ath10k *ar);
 int ath10k_core_fetch_board_file(struct ath10k *ar, int bd_ie_type);
 void ath10k_core_free_board_files(struct ath10k *ar);
+void ath10k_core_free_limits(struct ath10k* ar);
+
+int ath10k_sum_sigs_2(int a, int b);
+int ath10k_sum_sigs(int p20, int e20, int e40, int e80);
 
 #endif /* _CORE_H_ */

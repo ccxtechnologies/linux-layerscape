@@ -145,8 +145,10 @@ void ath10k_htt_tx_dec_pending(struct ath10k_htt *htt)
 	lockdep_assert_held(&htt->tx_lock);
 
 	htt->num_pending_tx--;
-	if (htt->num_pending_tx == htt->max_num_pending_tx - 1)
+	if ((htt->num_pending_tx <= (htt->max_num_pending_tx / 4)) && htt->needs_unlock) {
+		htt->needs_unlock = false;
 		ath10k_mac_tx_unlock(htt->ar, ATH10K_TX_PAUSE_Q_FULL);
+	}
 }
 
 int ath10k_htt_tx_inc_pending(struct ath10k_htt *htt)
@@ -157,8 +159,10 @@ int ath10k_htt_tx_inc_pending(struct ath10k_htt *htt)
 		return -EBUSY;
 
 	htt->num_pending_tx++;
-	if (htt->num_pending_tx == htt->max_num_pending_tx)
+	if (htt->num_pending_tx == htt->max_num_pending_tx) {
+		htt->needs_unlock = true;
 		ath10k_mac_tx_lock(htt->ar, ATH10K_TX_PAUSE_Q_FULL);
+	}
 
 	return 0;
 }
@@ -529,9 +533,15 @@ void ath10k_htt_tx_destroy(struct ath10k_htt *htt)
 	htt->tx_mem_allocated = false;
 }
 
+static void ath10k_htt_flush_tx_queue(struct ath10k_htt *htt)
+{
+
+	idr_for_each(&htt->pending_tx, ath10k_htt_tx_clean_up_pending, htt->ar);
+}
+
 void ath10k_htt_tx_stop(struct ath10k_htt *htt)
 {
-	idr_for_each(&htt->pending_tx, ath10k_htt_tx_clean_up_pending, htt->ar);
+	ath10k_htt_flush_tx_queue(htt);
 	idr_destroy(&htt->pending_tx);
 }
 
@@ -1146,11 +1156,52 @@ static u8 ath10k_htt_tx_get_tid(struct sk_buff *skb, bool is_eth)
 
 	if (!is_eth && ieee80211_is_mgmt(hdr->frame_control))
 		return HTT_DATA_TX_EXT_TID_MGMT;
+
+	else if (ieee80211_is_nullfunc(hdr->frame_control))
+		return HTT_DATA_TX_EXT_TID_NON_QOS_MCAST_BCAST;
 	else if (cb->flags & ATH10K_SKB_F_QOS)
 		return skb->priority & IEEE80211_QOS_CTL_TID_MASK;
 	else
 		return HTT_DATA_TX_EXT_TID_NON_QOS_MCAST_BCAST;
 }
+
+/* Copied from ieee80211_is_robust_mgmt_frame, but disable the check for has_protected
+ * since we do tx hw crypt, and it won't actually be encrypted even when this flag is
+ * set.
+ */
+bool ieee80211_is_robust_mgmt_frame_tx(struct ieee80211_hdr *hdr)
+{
+        if (ieee80211_is_disassoc(hdr->frame_control) ||
+            ieee80211_is_deauth(hdr->frame_control))
+                return true;
+
+        if (ieee80211_is_action(hdr->frame_control)) {
+                u8 *category;
+
+                /*
+                 * Action frames, excluding Public Action frames, are Robust
+                 * Management Frames. However, if we are looking at a Protected
+                 * frame, skip the check since the data may be encrypted and
+                 * the frame has already been found to be a Robust Management
+                 * Frame (by the other end).
+                 */
+		/*
+		if (ieee80211_has_protected(hdr->frame_control))
+                        return true;
+		*/
+                category = ((u8 *) hdr) + 24;
+                return *category != WLAN_CATEGORY_PUBLIC &&
+                        *category != WLAN_CATEGORY_HT &&
+                        *category != WLAN_CATEGORY_WNM_UNPROTECTED &&
+                        *category != WLAN_CATEGORY_SELF_PROTECTED &&
+                        *category != WLAN_CATEGORY_UNPROT_DMG &&
+                        *category != WLAN_CATEGORY_VHT &&
+                        *category != WLAN_CATEGORY_VENDOR_SPECIFIC;
+        }
+
+        return false;
+}
+
 
 int ath10k_htt_mgmt_tx(struct ath10k_htt *htt, struct sk_buff *msdu)
 {
@@ -1163,6 +1214,7 @@ int ath10k_htt_mgmt_tx(struct ath10k_htt *htt, struct sk_buff *msdu)
 	int len = 0;
 	int msdu_id = -1;
 	int res;
+	int skb_len;
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)msdu->data;
 
 	len += sizeof(cmd->hdr);
@@ -1187,7 +1239,8 @@ int ath10k_htt_mgmt_tx(struct ath10k_htt *htt, struct sk_buff *msdu)
 		goto err_free_msdu_id;
 	}
 
-	skb_cb->paddr = dma_map_single(dev, msdu->data, msdu->len,
+	skb_len = msdu->len;
+	skb_cb->paddr = dma_map_single(dev, msdu->data, skb_len,
 				       DMA_TO_DEVICE);
 	res = dma_mapping_error(dev, skb_cb->paddr);
 	if (res) {
@@ -1201,15 +1254,19 @@ int ath10k_htt_mgmt_tx(struct ath10k_htt *htt, struct sk_buff *msdu)
 
 	cmd->hdr.msg_type         = HTT_H2T_MSG_TYPE_MGMT_TX;
 	cmd->mgmt_tx.msdu_paddr = __cpu_to_le32(ATH10K_SKB_CB(msdu)->paddr);
-	cmd->mgmt_tx.len        = __cpu_to_le32(msdu->len);
+	cmd->mgmt_tx.len        = __cpu_to_le32(skb_len);
 	cmd->mgmt_tx.desc_id    = __cpu_to_le32(msdu_id);
 	cmd->mgmt_tx.vdev_id    = __cpu_to_le32(vdev_id);
 	memcpy(cmd->mgmt_tx.hdr, msdu->data,
-	       min_t(int, msdu->len, HTT_MGMT_FRM_HDR_DOWNLOAD_LEN));
+	       min_t(int, skb_len, HTT_MGMT_FRM_HDR_DOWNLOAD_LEN));
 
 	res = ath10k_htc_send(&htt->ar->htc, htt->eid, txdesc);
 	if (res)
 		goto err_unmap_msdu;
+
+#ifdef CONFIG_ATH10K_DEBUGFS
+	ar->debug.tx_bytes += skb_len;
+#endif
 
 	return 0;
 
@@ -1231,7 +1288,8 @@ err:
 	sizeof(struct htt_data_tx_desc) + \
 	sizeof(struct ath10k_htc_hdr))
 
-static int ath10k_htt_tx_hl(struct ath10k_htt *htt, enum ath10k_hw_txrx_mode txmode,
+static int ath10k_htt_tx_hl(struct ath10k_htt *htt, struct ieee80211_vif *vif,
+			    enum ath10k_hw_txrx_mode txmode,
 			    struct sk_buff *msdu)
 {
 	struct ath10k *ar = htt->ar;
@@ -1341,6 +1399,7 @@ out:
 }
 
 static int ath10k_htt_tx_32(struct ath10k_htt *htt,
+			    struct ieee80211_vif *vif,
 			    enum ath10k_hw_txrx_mode txmode,
 			    struct sk_buff *msdu)
 {
@@ -1360,10 +1419,147 @@ static int ath10k_htt_tx_32(struct ath10k_htt *htt,
 	u8 flags0 = 0;
 	u16 msdu_id, flags1 = 0;
 	u16 freq = 0;
+	int skb_len;
 	u32 frags_paddr = 0;
 	u32 txbuf_paddr;
 	struct htt_msdu_ext_desc *ext_desc = NULL;
 	struct htt_msdu_ext_desc *ext_desc_t = NULL;
+	u32 peer_id = HTT_INVALID_PEERID;
+	struct ath10k_vif *arvif = (void *)vif->drv_priv;
+
+	if (ar->state != ATH10K_STATE_ON) {
+		static bool done_once = 0;
+		if (!done_once) {
+			done_once = true;
+			ath10k_err(ar, "Invalid state: %d in ath10k_htt_tx_32, warning will not be repeated.\n",
+				   ar->state);
+			WARN_ON(1);
+		}
+		res = -ENODEV;
+		goto err;
+	}
+
+	if ((ar->eeprom_overrides.tx_debug & 0x3) &&
+	    (info->control.flags & IEEE80211_TX_CTRL_RATE_INJECT)) {
+		ath10k_warn(ar, "rate-inject, off-chan: %d txmode: %d\n",
+			    info->flags & IEEE80211_TX_CTL_TX_OFFCHAN, txmode);
+	}
+
+	/* ath10k_warn(ar, "info: %p  vif: %p arvif: %p txo-active: %d\n", info, vif, arvif, arvif && arvif->txo_active); */
+
+	if (unlikely(info->flags & IEEE80211_TX_CTL_TX_OFFCHAN))
+		freq = ar->scan.roc_freq;
+
+	else if (unlikely((arvif && arvif->txo_active)
+			  || (info->control.flags & IEEE80211_TX_CTRL_RATE_INJECT))) {
+		if (test_bit(ATH10K_FW_FEATURE_HAS_TX_RC_CT,
+			     ar->running_fw->fw_file.fw_features)) {
+			__le16 fc = hdr->frame_control;
+			enum nl80211_band band = info->band;
+			const struct ieee80211_supported_band *sband;
+			u8 tpc = 0xFF; /* don't need to set this */
+			u8 sgi = 0;
+			u8 mcs = 0;
+			u8 nss = 0;
+			u8 pream_type;
+			u8 num_retries;
+			u8 dyn_bw = 0;
+			u8 bw = 0;
+			u16 rix;
+			bool is_ht, is_vht;
+
+			sband = ar->hw->wiphy->bands[band];
+
+			rix = info->control.rates[0].idx;
+			is_ht = info->control.rates[0].flags & IEEE80211_TX_RC_MCS;
+			is_vht = info->control.rates[0].flags & IEEE80211_TX_RC_VHT_MCS;
+
+			if (info->control.flags & IEEE80211_TX_CTRL_RATE_INJECT) {
+				if (is_ht) {
+					mcs = rix % 8;
+					nss = rix / 8;
+					pream_type = WMI_RATE_PREAMBLE_HT;
+				/* VHT is untested: */
+				} else if (is_vht) {
+					mcs = ieee80211_rate_get_vht_mcs(&info->control.rates[0]);
+					nss = ieee80211_rate_get_vht_nss(&info->control.rates[0]); /* maybe -1? */
+					pream_type = WMI_RATE_PREAMBLE_VHT;
+				} else if (ath10k_mac_bitrate_is_cck(sband->bitrates[rix].bitrate)) {
+					mcs = sband->bitrates[rix].hw_value;
+					pream_type = WMI_RATE_PREAMBLE_CCK;
+				} else {
+					mcs = sband->bitrates[rix].hw_value; /* maybe - 4 ??? */
+					pream_type = WMI_RATE_PREAMBLE_OFDM;
+				}
+
+				num_retries = info->control.rates[0].count;
+			} else if ((msdu->len >= 100) &&
+			    (ieee80211_is_data_qos(fc) || ieee80211_is_data(fc)) &&
+			    (!(ieee80211_is_qos_nullfunc(fc) || ieee80211_is_nullfunc(fc)))) {
+				/* Only do the overrides for data frames. */
+				/*ath10k_warn(ar, "qos-data: %d data: %d  qos-nullfunc: %d  nullfunc: %d\n",
+					    ieee80211_is_data_qos(fc), ieee80211_is_data(fc),
+					    ieee80211_is_qos_nullfunc(fc), ieee80211_is_nullfunc(fc));*/
+				/* In order to allow ARP to work, don't mess with frames < 100 bytes in length, assume
+				 * test frames are larger.
+				 */
+
+				tpc = arvif->txo_tpc;
+				sgi = arvif->txo_sgi;
+				mcs = arvif->txo_mcs;
+				nss = arvif->txo_nss;
+				pream_type = arvif->txo_pream;
+				num_retries = arvif->txo_retries;
+				dyn_bw = arvif->txo_dynbw;
+				bw = arvif->txo_bw;
+				rix = arvif->txo_rix;
+				/*ath10k_warn(ar, "gathering txrate info from arvif, tpc: %d mcs: %d nss: %d pream_type: %d num_retries: %d dyn_bw: %d bw: %d rix: %d\n",
+				  tpc, mcs, nss, pream_type, num_retries, dyn_bw, bw, rix);*/
+			} else {
+				goto skip_fixed_rate;
+			}
+
+			if (ar->dev_id == QCA988X_2_0_DEVICE_ID ||
+			    ar->dev_id == QCA988X_2_0_DEVICE_ID_UBNT ||
+			    ar->dev_id == QCA9887_1_0_DEVICE_ID) {
+				/* wave-1 CT firmware has this API */
+				u32 rate_code = (pream_type << 6) | (nss << 4) | mcs;
+
+				if (num_retries == 0) {
+					/* Will never hit the air..surely this is not what user wanted! */
+					num_retries = 1;
+				}
+
+				peer_id = (0x8000); /* Earlier FW needed this, but this alone would break off-channel tx */
+				peer_id |= ((rate_code << 16) & 0xFF0000);
+				peer_id |= (((u32)(num_retries) << 24) & 0xF000000);
+				peer_id |= (0x20000000); /* Let FW know this is definitely a rate-code */
+
+				if (ar->eeprom_overrides.tx_debug & 0x3)
+					ath10k_warn(ar, "wave-1 vdev-id: %d msdu: %p  info: %p peer_id: 0x%x  rates.idx: %d  rate_code: 0x%x  hw-value: %d  bitrate: %d count: %d mcs: %d pream-type: %d  nss: %d\n",
+						    (int)(vdev_id), msdu, info, peer_id, rix, rate_code, sband->bitrates[rix].hw_value,
+						    sband->bitrates[rix].bitrate, (u32)(info->control.rates[0].count), mcs, pream_type, nss);
+			}
+			else {
+				if (unlikely(info->flags & IEEE80211_TX_CTL_NO_ACK)) {
+					num_retries = 0;
+				}
+
+				/* wave-2 supports this API */
+				peer_id = ath10k_convert_hw_rate_to_rate_info(tpc, mcs, sgi, nss, pream_type, num_retries, bw, dyn_bw);
+
+				if (ar->eeprom_overrides.tx_debug & 0x3)
+					ath10k_warn(ar, "wave-2 vdev-id: %d msdu: %p peer_id: 0x%x  tpc: %d sgi: %d mcs: %d nss: %d pream_type: %d num_retries: %d bw: %d dyn_bw: %d\n",
+						    (int)(vdev_id), msdu, peer_id, tpc, sgi, mcs, nss, pream_type, num_retries, bw, dyn_bw);
+			}
+		}
+	}
+
+skip_fixed_rate:
+	if (unlikely(info->flags & IEEE80211_TX_CTL_NO_ACK)) {
+		/* only works on wave-1, but should be properly ignored on wave-2 */
+		flags1 |= HTT_DATA_TX_DESC_FLAGS1_NO_ACK_CT;
+	}
 
 	res = ath10k_htt_tx_alloc_msdu_id(htt, msdu);
 	if (res < 0)
@@ -1378,17 +1574,25 @@ static int ath10k_htt_tx_32(struct ath10k_htt *htt,
 	txbuf_paddr = htt->txbuf.paddr +
 		      (sizeof(struct ath10k_htt_txbuf_32) * msdu_id);
 
-	if ((ieee80211_is_action(hdr->frame_control) ||
-	     ieee80211_is_deauth(hdr->frame_control) ||
-	     ieee80211_is_disassoc(hdr->frame_control)) &&
-	     ieee80211_has_protected(hdr->frame_control)) {
-		skb_put(msdu, IEEE80211_CCMP_MIC_LEN);
-	} else if (!(skb_cb->flags & ATH10K_SKB_F_NO_HWCRYPT) &&
-		   txmode == ATH10K_HW_TXRX_RAW &&
-		   ieee80211_has_protected(hdr->frame_control)) {
-		skb_put(msdu, IEEE80211_CCMP_MIC_LEN);
+	if (ar->eeprom_overrides.tx_debug & 0x3) {
+		ath10k_warn(ar,
+			    "htt tx, is-action: %d  deauth: %d  disassoc: %d  has-protected: %d  nohwcrypt: %d txmode: %d data-qos: %d\n",
+			    ieee80211_is_action(hdr->frame_control), ieee80211_is_deauth(hdr->frame_control),
+			    ieee80211_is_disassoc(hdr->frame_control), ieee80211_has_protected(hdr->frame_control),
+			    skb_cb->flags & ATH10K_SKB_F_NO_HWCRYPT, txmode, ieee80211_is_data_qos(hdr->frame_control));
 	}
 
+	if (!(skb_cb->flags & ATH10K_SKB_F_NO_HWCRYPT)) {
+		if (ieee80211_is_robust_mgmt_frame_tx(hdr) &&
+		    ieee80211_has_protected(hdr->frame_control)) {
+			skb_put(msdu, IEEE80211_CCMP_MIC_LEN);
+		} else if (txmode == ATH10K_HW_TXRX_RAW &&
+			   ieee80211_has_protected(hdr->frame_control)) {
+			skb_put(msdu, IEEE80211_CCMP_MIC_LEN);
+		}
+	}
+
+	/* NOTE:  This writes over info->control.rates[0], at least. */
 	skb_cb->paddr = dma_map_single(dev, msdu->data, msdu->len,
 				       DMA_TO_DEVICE);
 	res = dma_mapping_error(dev, skb_cb->paddr);
@@ -1396,9 +1600,6 @@ static int ath10k_htt_tx_32(struct ath10k_htt *htt,
 		res = -EIO;
 		goto err_free_msdu_id;
 	}
-
-	if (unlikely(info->flags & IEEE80211_TX_CTL_TX_OFFCHAN))
-		freq = ar->scan.roc_freq;
 
 	switch (txmode) {
 	case ATH10K_HW_TXRX_RAW:
@@ -1495,17 +1696,32 @@ static int ath10k_htt_tx_32(struct ath10k_htt *htt,
 		txbuf->cmd_tx.offchan_tx.freq =
 				__cpu_to_le16(freq);
 	} else {
-		txbuf->cmd_tx.peerid =
-				__cpu_to_le32(HTT_INVALID_PEERID);
+		txbuf->cmd_tx.peerid = __cpu_to_le32(peer_id);
 	}
 
+	skb_len = msdu->len;
 	trace_ath10k_htt_tx(ar, msdu_id, msdu->len, vdev_id, tid);
-	ath10k_dbg(ar, ATH10K_DBG_HTT,
-		   "htt tx flags0 %hhu flags1 %hu len %d id %hu frags_paddr %pad, msdu_paddr %pad vdev %hhu tid %hhu freq %hu\n",
-		   flags0, flags1, msdu->len, msdu_id, &frags_paddr,
-		   &skb_cb->paddr, vdev_id, tid, freq);
-	ath10k_dbg_dump(ar, ATH10K_DBG_HTT_DUMP, NULL, "htt tx msdu: ",
-			msdu->data, msdu->len);
+
+	if (ar->eeprom_overrides.tx_debug & 0x3) {
+		ath10k_warn(ar,
+			    "htt tx flags0 %hhu flags1 %hu (noack: %d) len %d id %hu frags_paddr %pad, msdu_paddr %pad vdev %hhu tid %hhu freq %hu\n",
+			    flags0, flags1, (flags1 & HTT_DATA_TX_DESC_FLAGS1_NO_ACK_CT), skb_len, msdu_id, &frags_paddr,
+			    &skb_cb->paddr, vdev_id, tid, freq);
+		if (ar->eeprom_overrides.tx_debug & 0x10) {
+			ath10k_dbg_dump(ar, ATH10K_DBG_BOOT, NULL, "htt tx msdu: ",
+					msdu->data, skb_len);
+		}
+	}
+	else {
+		ath10k_dbg(ar, ATH10K_DBG_HTT,
+			   "htt tx flags0 %hhu flags1 %hu len %d id %hu frags_paddr %pad, msdu_paddr %pad vdev %hhu tid %hhu freq %hu\n",
+			   flags0, flags1, skb_len, msdu_id, &frags_paddr,
+			   &skb_cb->paddr, vdev_id, tid, freq);
+
+		ath10k_dbg_dump(ar, ATH10K_DBG_HTT_DUMP, NULL, "htt tx msdu: ",
+				msdu->data, skb_len);
+	}
+
 	trace_ath10k_tx_hdr(ar, msdu->data, msdu->len);
 	trace_ath10k_tx_payload(ar, msdu->data, msdu->len);
 
@@ -1530,6 +1746,10 @@ static int ath10k_htt_tx_32(struct ath10k_htt *htt,
 	if (res)
 		goto err_unmap_msdu;
 
+#ifdef CONFIG_ATH10K_DEBUGFS
+	ar->debug.tx_bytes += skb_len;
+#endif
+
 	return 0;
 
 err_unmap_msdu:
@@ -1541,6 +1761,7 @@ err:
 }
 
 static int ath10k_htt_tx_64(struct ath10k_htt *htt,
+			    struct ieee80211_vif *vif,
 			    enum ath10k_hw_txrx_mode txmode,
 			    struct sk_buff *msdu)
 {
@@ -1564,6 +1785,18 @@ static int ath10k_htt_tx_64(struct ath10k_htt *htt,
 	dma_addr_t txbuf_paddr;
 	struct htt_msdu_ext_desc_64 *ext_desc = NULL;
 	struct htt_msdu_ext_desc_64 *ext_desc_t = NULL;
+
+	if (ar->state != ATH10K_STATE_ON) {
+		static bool done_once = 0;
+		if (!done_once) {
+			done_once = true;
+			ath10k_err(ar, "Invalid state: %d in ath10k_htt_tx_64, warning will not be repeated.\n",
+				   ar->state);
+			WARN_ON(1);
+		}
+		res = -ENODEV;
+		goto err;
+	}
 
 	res = ath10k_htt_tx_alloc_msdu_id(htt, msdu);
 	if (res < 0)
@@ -1774,6 +2007,7 @@ static const struct ath10k_htt_tx_ops htt_tx_ops_hl = {
 	.htt_send_frag_desc_bank_cfg = ath10k_htt_send_frag_desc_bank_cfg_32,
 	.htt_tx = ath10k_htt_tx_hl,
 	.htt_h2t_aggr_cfg_msg = ath10k_htt_h2t_aggr_cfg_msg_32,
+	.htt_flush_tx = ath10k_htt_flush_tx_queue,
 };
 
 void ath10k_htt_set_tx_ops(struct ath10k_htt *htt)

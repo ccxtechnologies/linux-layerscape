@@ -77,6 +77,9 @@ struct ath10k_hif_ops {
 
 	void (*write32)(struct ath10k *ar, u32 address, u32 value);
 
+	/* We think firmware has crashed, attempt to gather logs and recover. */
+	void (*fw_crashed_dump)(struct ath10k *ar);
+
 	/* Power up the device and enter BMI transfer mode for FW download */
 	int (*power_up)(struct ath10k *ar, enum ath10k_firmware_mode fw_mode);
 
@@ -129,12 +132,14 @@ static inline int ath10k_hif_exchange_bmi_msg(struct ath10k *ar,
 
 static inline int ath10k_hif_start(struct ath10k *ar)
 {
+	ar->hif_running = true;
 	return ar->hif.ops->start(ar);
 }
 
 static inline void ath10k_hif_stop(struct ath10k *ar)
 {
-	return ar->hif.ops->stop(ar);
+	ar->hif_running = false;
+	ar->hif.ops->stop(ar);
 }
 
 static inline int ath10k_hif_swap_mailbox(struct ath10k *ar)
@@ -205,6 +210,17 @@ static inline u32 ath10k_hif_read32(struct ath10k *ar, u32 address)
 	}
 
 	return ar->hif.ops->read32(ar, address);
+}
+
+static inline int ath10k_hif_fw_crashed_dump(struct ath10k *ar)
+{
+	if (!ar->hif.ops->fw_crashed_dump) {
+		ath10k_warn(ar, "hif fw_crashed_dump\n");
+		return -EINVAL;
+	}
+
+	ar->hif.ops->fw_crashed_dump(ar);
+	return 0;
 }
 
 static inline void ath10k_hif_write32(struct ath10k *ar,

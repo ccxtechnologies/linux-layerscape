@@ -15,6 +15,15 @@
 enum wmi_tlv_tx_pause_id;
 enum wmi_tlv_tx_pause_action;
 
+extern int ath10k_modparam_ct_sta;
+extern int ath10k_modparam_nohwcrypt;
+extern int ath10k_modparam_nobeamform_mu;
+extern int ath10k_modparam_nobeamform_su;
+extern int ath10k_modparam_target_num_vdevs_ct;
+extern int ath10k_modparam_target_num_peers_ct;
+extern int ath10k_modparam_target_num_msdu_desc_ct;
+extern int ath10k_modparam_target_num_rate_ctrl_objs_ct;
+
 struct ath10k_generic_iter {
 	struct ath10k *ar;
 	int ret;
@@ -54,10 +63,14 @@ void ath10k_mac_handle_tx_pause_vdev(struct ath10k *ar, u32 vdev_id,
 				     enum wmi_tlv_tx_pause_id pause_id,
 				     enum wmi_tlv_tx_pause_action action);
 
+bool ath10k_mac_bitrate_is_cck(int bitrate);
+u8 ath10k_convert_hw_rate_to_rc(u8 hw_rate, int bitrate);
 u8 ath10k_mac_hw_rate_to_idx(const struct ieee80211_supported_band *sband,
 			     u8 hw_rate, bool cck);
 u8 ath10k_mac_bitrate_to_idx(const struct ieee80211_supported_band *sband,
 			     u32 bitrate);
+u32 ath10k_convert_hw_rate_to_rate_info(u8 tpc, u8 mcs, u8 sgi, u8 nss, u8 pream_type,
+					u8 num_retries, u8 bw, u8 dyn_bw);
 
 void ath10k_mac_tx_lock(struct ath10k *ar, int reason);
 void ath10k_mac_tx_unlock(struct ath10k *ar, int reason);
@@ -70,8 +83,10 @@ int ath10k_mac_tx_push_txq(struct ieee80211_hw *hw,
 struct ieee80211_txq *ath10k_mac_txq_lookup(struct ath10k *ar,
 					    u16 peer_id,
 					    u8 tid);
+void ath10k_mac_print_txq_info(struct ath10k *ar, u16 peer_id, u8 tid);
 int ath10k_mac_ext_resource_config(struct ath10k *ar, u32 val);
 void ath10k_mac_wait_tx_complete(struct ath10k *ar);
+void ath10k_dump_peer_info(struct ath10k *ar);
 
 static inline void ath10k_tx_h_seq_no(struct ieee80211_vif *vif,
 				      struct sk_buff *skb)
@@ -90,5 +105,7 @@ static inline void ath10k_tx_h_seq_no(struct ieee80211_vif *vif,
 		hdr->seq_ctrl |= cpu_to_le16(arvif->tx_seq_no);
 	}
 }
+
+int ath10k_mac_set_pdev_kickout(struct ath10k *ar);
 
 #endif /* _MAC_H_ */

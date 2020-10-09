@@ -12,6 +12,7 @@
 #include <linux/dmi.h>
 #include <linux/ctype.h>
 #include <asm/byteorder.h>
+#include <linux/ctype.h>
 
 #include "core.h"
 #include "mac.h"
@@ -25,7 +26,8 @@
 #include "wmi-ops.h"
 #include "coredump.h"
 
-unsigned int ath10k_debug_mask;
+/* Disable ath10k-ct DBGLOG output by default */
+unsigned int ath10k_debug_mask = ATH10K_DBG_NO_DBGLOG;
 EXPORT_SYMBOL(ath10k_debug_mask);
 
 static unsigned int ath10k_cryptmode_param;
@@ -38,6 +40,11 @@ unsigned long ath10k_coredump_mask = BIT(ATH10K_FW_CRASH_DUMP_REGISTERS) |
 				     BIT(ATH10K_FW_CRASH_DUMP_CE_DATA);
 
 /* FIXME: most of these should be readonly */
+static int _modparam_override_eeprom_regdomain = -1;
+module_param_named(override_eeprom_regdomain,
+		   _modparam_override_eeprom_regdomain, int, 0444);
+MODULE_PARM_DESC(override_eeprom_regdomain, "Override regdomain hardcoded in EEPROM with this value (DANGEROUS).");
+
 module_param_named(debug_mask, ath10k_debug_mask, uint, 0644);
 module_param_named(cryptmode, ath10k_cryptmode_param, uint, 0644);
 module_param(uart_print, bool, 0644);
@@ -633,6 +640,29 @@ static const char *const ath10k_core_fw_feature_str[] = {
 	[ATH10K_FW_FEATURE_NON_BMI] = "non-bmi",
 	[ATH10K_FW_FEATURE_SINGLE_CHAN_INFO_PER_CHANNEL] = "single-chan-info-per-channel",
 	[ATH10K_FW_FEATURE_PEER_FIXED_RATE] = "peer-fixed-rate",
+	[ATH10K_FW_FEATURE_WMI_10X_CT] = "wmi-10.x-CT",
+	[ATH10K_FW_FEATURE_CT_RXSWCRYPT] = "rxswcrypt-CT",
+	[ATH10K_FW_FEATURE_HAS_TXSTATUS_NOACK] = "txstatus-noack",
+	[ATH10K_FW_FEATURE_CT_RATEMASK] = "ratemask-CT",
+	[ATH10K_FW_FEATURE_HAS_SAFE_BURST] = "safe-burst",
+	[ATH10K_FW_FEATURE_REGDUMP_CT] = "regdump-CT",
+	[ATH10K_FW_FEATURE_TXRATE_CT] = "txrate-CT",
+	[ATH10K_FW_FEATURE_FLUSH_ALL_CT] = "flush-all-CT",
+	[ATH10K_FW_FEATURE_PINGPONG_READ_CT] = "pingpong-CT",
+	[ATH10K_FW_FEATURE_SKIP_CH_RES_CT] = "ch-regs-CT",
+	[ATH10K_FW_FEATURE_NOP_CT] = "nop-CT",
+	[ATH10K_FW_FEATURE_HTT_MGT_CT] = "htt-mgt-CT",
+	[ATH10K_FW_FEATURE_SET_SPECIAL_CT] = "set-special-CT",
+	[ATH10K_FW_FEATURE_NO_BMISS_CT] = "no-bmiss-CT",
+	[ATH10K_FW_FEATURE_HAS_GET_TEMP_CT] = "get-temp-CT",
+	[ATH10K_FW_FEATURE_HAS_TX_RC_CT] = "tx-rc-CT",
+	[ATH10K_FW_FEATURE_CUST_STATS_CT] = "cust-stats-CT",
+	[ATH10K_FW_FEATURE_RETRY_GT2_CT] = "retry-gt2-CT",
+	[ATH10K_FW_FEATURE_CT_STA] = "CT-STA",
+	[ATH10K_FW_FEATURE_TXRATE2_CT] = "txrate2-CT",
+	[ATH10K_FW_FEATURE_BEACON_TX_CB_CT] = "beacon-cb-CT",
+	[ATH10K_FW_FEATURE_CONSUME_BLOCK_ACK_CT] = "wmi-block-ack-CT",
+	[ATH10K_FW_FEATURE_HAS_BCN_RC_CT] = "wmi-bcn-rc-CT",
 };
 
 static unsigned int ath10k_core_get_fw_feature_str(char *buf,
@@ -714,12 +744,34 @@ static int ath10k_init_configure_target(struct ath10k *ar)
 {
 	u32 param_host;
 	int ret;
+	u32 tx_credits = TARGET_HTC_MAX_TX_CREDITS_CT;
+
+	/* at 64 vdevs, the NIC is tight on memory, so only allow 2
+	 * tx-credits in that case. */
+	if (ar->max_num_vdevs > 60)
+		tx_credits = min(tx_credits, (u32)2);
 
 	/* tell target which HTC version it is used*/
 	ret = ath10k_bmi_write32(ar, hi_app_host_interest,
 				 HTC_PROTOCOL_VERSION);
 	if (ret) {
 		ath10k_err(ar, "settings HTC version failed\n");
+		return ret;
+	}
+
+	/* Configure HTC credits logic. */
+	param_host = (TARGET_HTC_MAX_CONTROL_BUFFERS << 16);
+	param_host |= (TARGET_HTC_MAX_PENDING_TXCREDITS_RPTS << 20);
+
+	/* Max tx buffers (tx-credits), CT firmware only.
+	 * but normal .487 firmware will just ignore it fine.
+	 */
+	param_host |= (tx_credits << 24);
+
+	ret = ath10k_bmi_write32(ar, hi_mbox_io_block_sz,
+				 param_host);
+	if (ret) {
+		ath10k_err(ar, "failed setting HTC mbox-io-block-sz\n");
 		return ret;
 	}
 
@@ -1076,6 +1128,10 @@ static void ath10k_core_free_firmware_files(struct ath10k *ar)
 
 	ath10k_swap_code_seg_release(ar, &ar->normal_mode_fw.fw_file);
 
+	if (!IS_ERR(ar->fwcfg_file))
+		release_firmware(ar->fwcfg_file);
+	ar->fwcfg_file = NULL;
+
 	ar->normal_mode_fw.fw_file.otp_data = NULL;
 	ar->normal_mode_fw.fw_file.otp_len = 0;
 
@@ -1099,9 +1155,15 @@ static int ath10k_fetch_cal_file(struct ath10k *ar)
 	if (!IS_ERR(ar->pre_cal_file))
 		goto success;
 
-	/* cal-<bus>-<id>.bin */
-	scnprintf(filename, sizeof(filename), "cal-%s-%s.bin",
-		  ath10k_bus_str(ar->hif.bus), dev_name(ar->dev));
+	if (ar->fwcfg.calname[0]) {
+		/* Use user-specified file name. */
+		strncpy(filename, ar->fwcfg.calname, sizeof(filename));
+		filename[sizeof(filename) - 1] = 0;
+	} else {
+		/* cal-<bus>-<id>.bin */
+		scnprintf(filename, sizeof(filename), "cal-%s-%s.bin",
+			  ath10k_bus_str(ar->hif.bus), dev_name(ar->dev));
+	}
 
 	ar->cal_file = ath10k_fetch_fw_file(ar, ATH10K_FW_DIR, filename);
 	if (IS_ERR(ar->cal_file))
@@ -1111,6 +1173,264 @@ success:
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "found calibration file %s/%s\n",
 		   ATH10K_FW_DIR, filename);
 
+	return 0;
+}
+
+static int ath10k_fetch_fwcfg_file(struct ath10k *ar)
+{
+	char filename[100];
+	const char* buf;
+	size_t i = 0;
+	char val[100];
+	size_t key_idx;
+	size_t val_idx;
+	char c;
+	size_t sz;
+	long t;
+
+	ar->fwcfg.flags = 0;
+
+	/* fwcfg-<bus>-<id>.txt */
+	/* If this changes, change ath10k_read_fwinfo as well. */
+	scnprintf(filename, sizeof(filename), "fwcfg-%s-%s.txt",
+		  ath10k_bus_str(ar->hif.bus), dev_name(ar->dev));
+
+	ar->fwcfg_file = ath10k_fetch_fw_file(ar, ATH10K_FW_DIR, filename);
+	if (IS_ERR(ar->fwcfg_file)) {
+		/* FW config file is optional, don't be scary. */
+		ath10k_dbg(ar, ATH10K_DBG_BOOT,
+			   "Could not find firmware config file %s/%s, continuing with defaults.\n",
+			   ATH10K_FW_DIR, filename);
+		return PTR_ERR(ar->fwcfg_file);
+	}
+
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "found firmware config file %s/%s\n",
+		   ATH10K_FW_DIR, filename);
+
+	/* Now, attempt to parse results.
+	 * Format is key=value
+	 */
+	buf = (const char*)(ar->fwcfg_file->data);
+	while (i < ar->fwcfg_file->size) {
+start_again:
+		/* First, eat space, or entire line if we have # as first char */
+		c = buf[i];
+		while (isspace(c)) {
+			i++;
+			if (i >= ar->fwcfg_file->size)
+				goto done;
+			c = buf[i];
+		}
+		/* Eat comment ? */
+		if (c == '#') {
+			i++;
+			while (i < ar->fwcfg_file->size) {
+				c = buf[i];
+				i++;
+				if (c == '\n')
+					goto start_again;
+			}
+			/* Found no newline, must be done. */
+			goto done;
+		}
+
+		/* If here, we have start of token, store it in 'filename' to save space */
+		key_idx = 0;
+		while (i < ar->fwcfg_file->size) {
+			c = buf[i];
+			if (c == '=') {
+				i++;
+				c = buf[i];
+				/* Eat any space after the '=' sign. */
+				while (i < ar->fwcfg_file->size) {
+					if (!isspace(c)) {
+						break;
+					}
+					i++;
+					c = buf[i];
+				}
+				break;
+			}
+			if (isspace(c)) {
+				i++;
+				continue;
+			}
+			filename[key_idx] = c;
+			key_idx++;
+			if (key_idx >= sizeof(filename)) {
+				/* Too long, bail out. */
+				goto done;
+			}
+			i++;
+		}
+		filename[key_idx] = 0; /* null terminate */
+
+		/* We have found the key, now find the value */
+		val_idx = 0;
+		while (i < ar->fwcfg_file->size) {
+			c = buf[i];
+			if (isspace(c))
+				break;
+			val[val_idx] = c;
+			val_idx++;
+			if (val_idx >= sizeof(val)) {
+				/* Too long, bail out. */
+				goto done;
+			}
+			i++;
+		}
+		val[val_idx] = 0; /* null terminate value */
+
+		/* We have key and value now. */
+		ath10k_warn(ar, "fwcfg key: %s  val: %s\n",
+			    filename, val);
+
+		/* Assign key and values as appropriate */
+		if (strcasecmp(filename, "calname") == 0) {
+			sz = sizeof(ar->fwcfg.calname);
+			strncpy(ar->fwcfg.calname, val, sz);
+			ar->fwcfg.calname[sz - 1] = 0; /* ensure null term */
+		}
+		else if (strcasecmp(filename, "bname") == 0) {
+			sz = sizeof(ar->fwcfg.bname);
+			strncpy(ar->fwcfg.bname, val, sz);
+			ar->fwcfg.bname[sz - 1] = 0; /* ensure null term */
+		}
+		else if (strcasecmp(filename, "bname_ext") == 0) {
+			sz = sizeof(ar->fwcfg.bname_ext);
+			strncpy(ar->fwcfg.bname_ext, val, sz);
+			ar->fwcfg.bname_ext[sz - 1] = 0; /* ensure null term */
+		}
+		else if (strcasecmp(filename, "fwname") == 0) {
+			sz = sizeof(ar->fwcfg.fwname);
+			strncpy(ar->fwcfg.fwname, val, sz);
+			ar->fwcfg.fwname[sz - 1] = 0; /* ensure null term */
+		}
+		else if (strcasecmp(filename, "fwver") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.fwver = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_FWVER;
+			}
+		}
+		else if (strcasecmp(filename, "dma_burst") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.dma_burst = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_DMA_BURST;
+			}
+		}
+		else if (strcasecmp(filename, "vdevs") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.vdevs = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_VDEVS;
+			}
+		}
+		else if (strcasecmp(filename, "stations") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.stations = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_STATIONS;
+			}
+		}
+		else if (strcasecmp(filename, "peers") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.peers = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_PEERS;
+			}
+		}
+		else if (strcasecmp(filename, "nohwcrypt") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.nohwcrypt = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_NOHWCRYPT;
+			}
+		}
+		else if (strcasecmp(filename, "allow_all_mcs") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.allow_all_mcs = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_ALLOW_ALL_MCS;
+			}
+		}
+		else if (strcasecmp(filename, "ct_sta_mode") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.ct_sta_mode = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_CT_STA;
+			}
+		}
+		else if (strcasecmp(filename, "nobeamform_mu") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.nobeamform_mu = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_NOBEAMFORM_MU;
+			}
+		}
+		else if (strcasecmp(filename, "nobeamform_su") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.nobeamform_su = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_NOBEAMFORM_SU;
+			}
+		}
+		else if (strcasecmp(filename, "rate_ctrl_objs") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.rate_ctrl_objs = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_RATE_CTRL_OBJS;
+			}
+		}
+		else if (strcasecmp(filename, "tx_desc") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.tx_desc = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_TX_DESC;
+			}
+		}
+		else if (strcasecmp(filename, "max_nss") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.max_nss = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_MAX_NSS;
+			}
+		}
+		else if (strcasecmp(filename, "tids") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.num_tids = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_NUM_TIDS;
+			}
+		}
+		else if (strcasecmp(filename, "active_peers") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.active_peers = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_ACTIVE_PEERS;
+			}
+		}
+		else if (strcasecmp(filename, "skid_limit") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.skid_limit = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_SKID_LIMIT;
+			}
+		}
+		else if (strcasecmp(filename, "regdom") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.regdom = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_REGDOM;
+			}
+		}
+		else if (strcasecmp(filename, "bmiss_vdevs") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.bmiss_vdevs = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_BMISS_VDEVS;
+			}
+		}
+		else if (strcasecmp(filename, "max_amsdus") == 0) {
+			if (kstrtol(val, 0, &t) == 0) {
+				ar->fwcfg.max_amsdus = t;
+				ar->fwcfg.flags |= ATH10K_FWCFG_MAX_AMSDUS;
+				if (ar->fwcfg.max_amsdus > 31) {
+					ath10k_warn(ar, "Invalid fwcfg max_amsdus value: %d.  Must not be greater than 31.\n",
+						    ar->fwcfg.max_amsdus);
+					ar->fwcfg.max_amsdus = 31;
+				}
+			}
+		}
+		else {
+			ath10k_warn(ar, "Unknown fwcfg key name -:%s:-, val: %s\n",
+				    filename, val);
+		}
+	}
+done:
 	return 0;
 }
 
@@ -1124,9 +1444,14 @@ static int ath10k_core_fetch_board_data_api_1(struct ath10k *ar, int bd_ie_type)
 			return -EINVAL;
 		}
 
-		ar->normal_mode_fw.board = ath10k_fetch_fw_file(ar,
-								ar->hw_params.fw.dir,
-								ar->hw_params.fw.board);
+		if (ar->fwcfg.bname[0])
+			ar->normal_mode_fw.board = ath10k_fetch_fw_file(ar,
+									ar->hw_params.fw.dir,
+									ar->fwcfg.bname);
+		else
+			ar->normal_mode_fw.board = ath10k_fetch_fw_file(ar,
+									ar->hw_params.fw.dir,
+									ar->hw_params.fw.board);
 		if (IS_ERR(ar->normal_mode_fw.board))
 			return PTR_ERR(ar->normal_mode_fw.board);
 
@@ -1138,8 +1463,12 @@ static int ath10k_core_fetch_board_data_api_1(struct ath10k *ar, int bd_ie_type)
 			return -EINVAL;
 		}
 
-		fw = ath10k_fetch_fw_file(ar, ar->hw_params.fw.dir,
-					  ar->hw_params.fw.eboard);
+		if (ar->fwcfg.bname_ext[0])
+			fw = ath10k_fetch_fw_file(ar, ar->hw_params.fw.dir,
+						  ar->fwcfg.bname_ext);
+		else
+			fw = ath10k_fetch_fw_file(ar, ar->hw_params.fw.dir,
+						  ar->hw_params.fw.eboard);
 		ar->normal_mode_fw.ext_board = fw;
 		if (IS_ERR(ar->normal_mode_fw.ext_board))
 			return PTR_ERR(ar->normal_mode_fw.ext_board);
@@ -1147,6 +1476,14 @@ static int ath10k_core_fetch_board_data_api_1(struct ath10k *ar, int bd_ie_type)
 		ar->normal_mode_fw.ext_board_data = ar->normal_mode_fw.ext_board->data;
 		ar->normal_mode_fw.ext_board_len = ar->normal_mode_fw.ext_board->size;
 	}
+
+	/* Save firmware board name so we can display it later. */
+	if (ar->fwcfg.bname[0])
+		strlcpy(ar->normal_mode_fw.fw_file.fw_board_name, ar->fwcfg.bname,
+			sizeof(ar->normal_mode_fw.fw_file.fw_board_name));
+	else
+		strlcpy(ar->normal_mode_fw.fw_file.fw_board_name, ar->hw_params.fw.board,
+			sizeof(ar->normal_mode_fw.fw_file.fw_board_name));
 
 	return 0;
 }
@@ -1363,6 +1700,10 @@ static int ath10k_core_fetch_board_data_api_n(struct ath10k *ar,
 	if (ret)
 		goto err;
 
+	/* Save firmware board name so we can display it later. */
+	strlcpy(ar->normal_mode_fw.fw_file.fw_board_name, filename,
+		sizeof(ar->normal_mode_fw.fw_file.fw_board_name));
+
 	return 0;
 
 err:
@@ -1470,7 +1811,26 @@ fallback:
 	}
 
 success:
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "using board api %d\n", ar->bd_api);
+	/* Store configAddr overloads to apply after firmware boots.  OTP will likely
+	 * overwrite them and so they would otherwise be lost.
+	 */
+	if (ar->hw_params.id == QCA988X_HW_2_0_VERSION) {
+		int addrs = 24;
+		int i;
+		u32 *e32 = (u32*)(ar->normal_mode_fw.board_data);
+		int offset = (ar->hw_params.cal_data_len - (addrs * 4)) / 4; /* Start of configAddr */
+		/*ath10k_dbg(ar, ATH10K_DBG_BOOT, "Check saving eeprom configAddr from board-data\n");*/
+		for (i = 0; i<addrs; i++) {
+			ar->eeprom_configAddrs[i] = le32_to_cpu(e32[offset + i]);
+			if (ar->eeprom_configAddrs[i]) {
+				ath10k_dbg(ar, ATH10K_DBG_BOOT, "saving eeprom configAddr[%i]: 0x%08x\n",
+					   i, ar->eeprom_configAddrs[i]);
+			}
+		}
+	}
+
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "using board api %d, specified-file-name: %s\n",
+		   ar->bd_api, ar->fwcfg.bname[0] ? ar->fwcfg.bname : "NA");
 	return 0;
 }
 EXPORT_SYMBOL(ath10k_core_fetch_board_file);
@@ -1760,6 +2120,13 @@ out_free:
 	return ret;
 }
 
+struct ath10k_bss_rom_ie {
+	__le32 ram_addr;
+	__le32 ram_len;
+	__le32 rom_addr;
+	__le32 rom_len;
+} __packed;
+
 int ath10k_core_fetch_firmware_api_n(struct ath10k *ar, const char *name,
 				     struct ath10k_fw_file *fw_file)
 {
@@ -1768,6 +2135,7 @@ int ath10k_core_fetch_firmware_api_n(struct ath10k *ar, const char *name,
 	struct ath10k_fw_ie *hdr;
 	const u8 *data;
 	__le32 *timestamp, *version;
+	struct ath10k_bss_rom_ie *bss;
 
 	/* first fetch the firmware file (firmware-*.bin) */
 	fw_file->firmware = ath10k_fetch_fw_file(ar, ar->hw_params.fw.dir,
@@ -1881,6 +2249,12 @@ int ath10k_core_fetch_firmware_api_n(struct ath10k *ar, const char *name,
 
 			break;
 		case ATH10K_FW_IE_WMI_OP_VERSION:
+			/* Upstream stole the ID CT firmware was using, so add
+			 * hack-around to deal with backwards-compat. --Ben
+			 */
+			if (ie_len >= sizeof(*bss))
+				goto fw_ie_bss_info_ct;
+
 			if (ie_len != sizeof(u32))
 				break;
 
@@ -1909,6 +2283,40 @@ int ath10k_core_fetch_firmware_api_n(struct ath10k *ar, const char *name,
 			fw_file->codeswap_data = data;
 			fw_file->codeswap_len = ie_len;
 			break;
+		case ATH10K_FW_IE_BSS_INFO_CT:
+fw_ie_bss_info_ct:
+			if (ie_len < sizeof(*bss)) {
+				ath10k_warn(ar, "invalid ie len for bss-info (%zd)\n",
+					    ie_len);
+				break;
+			}
+			bss = (struct ath10k_bss_rom_ie *)(data);
+
+			fw_file->ram_bss_addr = le32_to_cpu(bss->ram_addr);
+			fw_file->ram_bss_len = le32_to_cpu(bss->ram_len);
+			ath10k_dbg(ar, ATH10K_DBG_BOOT,
+				   "found RAM BSS addr 0x%x length %d\n",
+				   fw_file->ram_bss_addr, fw_file->ram_bss_len);
+
+			if (fw_file->ram_bss_len > ATH10K_RAM_BSS_BUF_LEN) {
+				ath10k_warn(ar, "too long firmware RAM BSS length: %d\n",
+					    fw_file->ram_bss_len);
+				fw_file->ram_bss_len = 0;
+			}
+
+			fw_file->rom_bss_addr = le32_to_cpu(bss->rom_addr);
+			fw_file->rom_bss_len = le32_to_cpu(bss->rom_len);
+			ath10k_dbg(ar, ATH10K_DBG_BOOT,
+				   "found ROM BSS addr 0x%x length %d\n",
+				   fw_file->rom_bss_addr, fw_file->rom_bss_len);
+
+			if (fw_file->rom_bss_len > ATH10K_ROM_BSS_BUF_LEN) {
+				ath10k_warn(ar, "too long firmware ROM BSS length: %d\n",
+					    fw_file->rom_bss_len);
+				fw_file->rom_bss_len = 0;
+			}
+
+			break;
 		default:
 			ath10k_warn(ar, "Unknown FW IE: %u\n",
 				    le32_to_cpu(hdr->id));
@@ -1929,6 +2337,23 @@ int ath10k_core_fetch_firmware_api_n(struct ath10k *ar, const char *name,
 		ret = -ENOMEDIUM;
 		goto err;
 	}
+
+	/* Only CT firmware has BSS stuff, so we can use this to fix up
+	 * flags for backwards and forwards compat with older/newer CT firmware.
+	 * (upstream stole some bits it was using)
+	 */
+	if (fw_file->rom_bss_addr) {
+		if (test_bit(5, fw_file->fw_features))
+			__set_bit(ATH10K_FW_FEATURE_WMI_10X_CT,
+				  fw_file->fw_features);
+
+		if (test_bit(6, fw_file->fw_features))
+			__set_bit(ATH10K_FW_FEATURE_CT_RXSWCRYPT,
+				  fw_file->fw_features);
+	}
+
+	/* Save firmware name so we can display it later. */
+	strlcpy(fw_file->fw_name, name, sizeof(fw_file->fw_name));
 
 	return 0;
 
@@ -1961,8 +2386,48 @@ static int ath10k_core_fetch_firmware_files(struct ath10k *ar)
 	int ret, i;
 	char fw_name[100];
 
+	/* First, see if we have a special config file for this firmware. */
+	ath10k_fetch_fwcfg_file(ar);
+
 	/* calibration file is optional, don't check for any errors */
 	ath10k_fetch_cal_file(ar);
+
+	/* Check for user-specified firmware name. */
+	if (ar->fwcfg.fwname[0]) {
+		if (ar->fwcfg.flags & ATH10K_FWCFG_FWVER) {
+			ar->fw_api = ar->fwcfg.fwver;
+			ath10k_dbg(ar, ATH10K_DBG_BOOT,
+				   "trying user-specified fw %s api %d\n",
+				   ar->fwcfg.fwname, ar->fw_api);
+
+			ret = ath10k_core_fetch_firmware_api_n(ar, ar->fwcfg.fwname,
+							       &ar->normal_mode_fw.fw_file);
+			if (ret == 0)
+				goto success;
+		}
+		else {
+			ath10k_warn(ar, "fwcfg fwname specified but no fwver specified, ignoring fwname.\n");
+		}
+	}
+
+	/* Check for CT firmware version 5 API. */
+	ar->fw_api = 5;
+	ath10k_dbg(ar, ATH10K_DBG_BOOT,
+		   "trying CT firmware version 5: ct-firmware-5.bin\n");
+	ret = ath10k_core_fetch_firmware_api_n(ar, "ct-firmware-5.bin",
+					       &ar->normal_mode_fw.fw_file);
+	if (ret == 0)
+		goto success;
+
+	/* Check for CT firmware version 2 API. */
+	ar->fw_api = 2;
+	ath10k_dbg(ar, ATH10K_DBG_BOOT,
+		   "trying CT firmware version 2: ct-firmware-2.bin\n");
+	ret = ath10k_core_fetch_firmware_api_n(ar, "ct-firmware-2.bin",
+					       &ar->normal_mode_fw.fw_file);
+	if (ret == 0)
+		goto success;
+
 
 	for (i = ATH10K_FW_API_MAX; i >= ATH10K_FW_API_MIN; i--) {
 		ar->fw_api = i;
@@ -1985,9 +2450,53 @@ static int ath10k_core_fetch_firmware_files(struct ath10k *ar)
 	return ret;
 
 success:
-	ath10k_dbg(ar, ATH10K_DBG_BOOT, "using fw api %d\n", ar->fw_api);
+	ath10k_dbg(ar, ATH10K_DBG_BOOT, "using fw api %d: %s/%s\n",
+		   ar->fw_api, ar->hw_params.fw.dir,
+		   ar->normal_mode_fw.fw_file.fw_name);
 
 	return 0;
+}
+
+int ath10k_sum_sigs_2(int a, int b) {
+	int diff;
+
+	/* 0x80 means value-is-not-set */
+	if (b == 0x80)
+		return a;
+
+	if (a >= b) {
+		/* a is largest value, add to it. */
+		diff = a - b;
+		if (diff == 0)
+			return a + 3;
+		else if (diff == 1)
+			return a + 2;
+		else if (diff == 2)
+			return a + 1;
+		return a;
+	}
+	else {
+		/* b is largest value, add to it. */
+		diff = b - a;
+		if (diff == 0)
+			return b + 3;
+		else if (diff == 1)
+			return b + 2;
+		else if (diff == 2)
+			return b + 1;
+		return b;
+	}
+}
+
+int ath10k_sum_sigs(int p20, int e20, int e40, int e80) {
+	/* Hacky attempt at summing dbm without resorting to log(10) business */
+	/* 0x80 means value-is-not-set */
+	if (e40 != 0x80) {
+		return ath10k_sum_sigs_2(ath10k_sum_sigs_2(p20, e20), ath10k_sum_sigs_2(e40, e80));
+	}
+	else {
+		return ath10k_sum_sigs_2(p20, e20);
+	}
 }
 
 static int ath10k_core_pre_cal_download(struct ath10k *ar)
@@ -2038,7 +2547,7 @@ static int ath10k_core_pre_cal_config(struct ath10k *ar)
 
 	ret = ath10k_download_and_run_otp(ar);
 	if (ret) {
-		ath10k_err(ar, "failed to run otp: %d\n", ret);
+		ath10k_err(ar, "failed to run otp: %d (pre-cal-config)\n", ret);
 		return ret;
 	}
 
@@ -2092,7 +2601,7 @@ static int ath10k_download_cal_data(struct ath10k *ar)
 
 	ret = ath10k_download_and_run_otp(ar);
 	if (ret) {
-		ath10k_err(ar, "failed to run otp: %d\n", ret);
+		ath10k_err(ar, "failed to run otp: %d (download-cal-data)\n", ret);
 		return ret;
 	}
 
@@ -2151,7 +2660,8 @@ static int ath10k_init_uart(struct ath10k *ar)
 		return ret;
 	}
 
-	ath10k_info(ar, "UART prints enabled\n");
+	ath10k_info(ar, "UART prints enabled: 19200, tx-pin: %d\n",
+		    ar->hw_params.uart_pin);
 	return 0;
 }
 
@@ -2216,6 +2726,7 @@ static void ath10k_core_restart(struct work_struct *work)
 	 * with conf_mutex it will deadlock.
 	 */
 	cancel_work_sync(&ar->set_coverage_class_work);
+	cancel_work_sync(&ar->stop_scan_work);
 
 	mutex_lock(&ar->conf_mutex);
 
@@ -2346,77 +2857,6 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 		}
 	}
 
-	switch (fw_file->wmi_op_version) {
-	case ATH10K_FW_WMI_OP_VERSION_MAIN:
-		max_num_peers = TARGET_NUM_PEERS;
-		ar->max_num_stations = TARGET_NUM_STATIONS;
-		ar->max_num_vdevs = TARGET_NUM_VDEVS;
-		ar->htt.max_num_pending_tx = TARGET_NUM_MSDU_DESC;
-		ar->fw_stats_req_mask = WMI_STAT_PDEV | WMI_STAT_VDEV |
-			WMI_STAT_PEER;
-		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
-		break;
-	case ATH10K_FW_WMI_OP_VERSION_10_1:
-	case ATH10K_FW_WMI_OP_VERSION_10_2:
-	case ATH10K_FW_WMI_OP_VERSION_10_2_4:
-		if (ath10k_peer_stats_enabled(ar)) {
-			max_num_peers = TARGET_10X_TX_STATS_NUM_PEERS;
-			ar->max_num_stations = TARGET_10X_TX_STATS_NUM_STATIONS;
-		} else {
-			max_num_peers = TARGET_10X_NUM_PEERS;
-			ar->max_num_stations = TARGET_10X_NUM_STATIONS;
-		}
-		ar->max_num_vdevs = TARGET_10X_NUM_VDEVS;
-		ar->htt.max_num_pending_tx = TARGET_10X_NUM_MSDU_DESC;
-		ar->fw_stats_req_mask = WMI_STAT_PEER;
-		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
-		break;
-	case ATH10K_FW_WMI_OP_VERSION_TLV:
-		max_num_peers = TARGET_TLV_NUM_PEERS;
-		ar->max_num_stations = TARGET_TLV_NUM_STATIONS;
-		ar->max_num_vdevs = TARGET_TLV_NUM_VDEVS;
-		ar->max_num_tdls_vdevs = TARGET_TLV_NUM_TDLS_VDEVS;
-		if (ar->hif.bus == ATH10K_BUS_SDIO)
-			ar->htt.max_num_pending_tx =
-				TARGET_TLV_NUM_MSDU_DESC_HL;
-		else
-			ar->htt.max_num_pending_tx = TARGET_TLV_NUM_MSDU_DESC;
-		ar->wow.max_num_patterns = TARGET_TLV_NUM_WOW_PATTERNS;
-		ar->fw_stats_req_mask = WMI_TLV_STAT_PDEV | WMI_TLV_STAT_VDEV |
-			WMI_TLV_STAT_PEER | WMI_TLV_STAT_PEER_EXTD;
-		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
-		ar->wmi.mgmt_max_num_pending_tx = TARGET_TLV_MGMT_NUM_MSDU_DESC;
-		break;
-	case ATH10K_FW_WMI_OP_VERSION_10_4:
-		max_num_peers = TARGET_10_4_NUM_PEERS;
-		ar->max_num_stations = TARGET_10_4_NUM_STATIONS;
-		ar->num_active_peers = TARGET_10_4_ACTIVE_PEERS;
-		ar->max_num_vdevs = TARGET_10_4_NUM_VDEVS;
-		ar->num_tids = TARGET_10_4_TGT_NUM_TIDS;
-		ar->fw_stats_req_mask = WMI_10_4_STAT_PEER |
-					WMI_10_4_STAT_PEER_EXTD |
-					WMI_10_4_STAT_VDEV_EXTD;
-		ar->max_spatial_stream = ar->hw_params.max_spatial_stream;
-		ar->max_num_tdls_vdevs = TARGET_10_4_NUM_TDLS_VDEVS;
-
-		if (test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL,
-			     fw_file->fw_features))
-			ar->htt.max_num_pending_tx = TARGET_10_4_NUM_MSDU_DESC_PFC;
-		else
-			ar->htt.max_num_pending_tx = TARGET_10_4_NUM_MSDU_DESC;
-		break;
-	case ATH10K_FW_WMI_OP_VERSION_UNSET:
-	case ATH10K_FW_WMI_OP_VERSION_MAX:
-	default:
-		WARN_ON(1);
-		return -EINVAL;
-	}
-
-	if (ar->hw_params.num_peers)
-		ar->max_num_peers = ar->hw_params.num_peers;
-	else
-		ar->max_num_peers = max_num_peers;
-
 	/* Backwards compatibility for firmwares without
 	 * ATH10K_FW_IE_HTT_OP_VERSION.
 	 */
@@ -2436,9 +2876,198 @@ static int ath10k_core_init_firmware_features(struct ath10k *ar)
 		case ATH10K_FW_WMI_OP_VERSION_10_4:
 		case ATH10K_FW_WMI_OP_VERSION_UNSET:
 		case ATH10K_FW_WMI_OP_VERSION_MAX:
-			ath10k_err(ar, "htt op version not found from fw meta data");
+			WARN_ON(1);
 			return -EINVAL;
 		}
+	}
+
+	/* CT 10.1 firmware slowly added features, all mostly under one feature
+	 * flag.  But, for 10.2, I need to add features at a time so that we can
+	 * maintain ability to bisect the firmware and to have fine-grained support
+	 * for enabling/disabling firmware features.  For backwards-compt with 10.1
+	 * firmware, set all the flags here.
+	 */
+	if (test_bit(ATH10K_FW_FEATURE_WMI_10X_CT, fw_file->fw_features) &&
+	    (fw_file->wmi_op_version == ATH10K_FW_WMI_OP_VERSION_10_1)) {
+		__set_bit(ATH10K_FW_FEATURE_SET_SPECIAL_CT, fw_file->fw_features);
+		__set_bit(ATH10K_FW_FEATURE_REGDUMP_CT, fw_file->fw_features);
+		__set_bit(ATH10K_FW_FEATURE_TXRATE_CT, fw_file->fw_features);
+		__set_bit(ATH10K_FW_FEATURE_FLUSH_ALL_CT, fw_file->fw_features);
+		__set_bit(ATH10K_FW_FEATURE_PINGPONG_READ_CT, fw_file->fw_features);
+		__set_bit(ATH10K_FW_FEATURE_SKIP_CH_RES_CT, fw_file->fw_features);
+		__set_bit(ATH10K_FW_FEATURE_NOP_CT, fw_file->fw_features);
+	}
+
+	switch (fw_file->wmi_op_version) {
+	case ATH10K_FW_WMI_OP_VERSION_MAIN:
+		max_num_peers = TARGET_NUM_PEERS;
+		ar->bmiss_offload_max_vdev = TARGET_BMISS_OFFLOAD_MAX_VDEV;
+		ar->skid_limit = TARGET_AST_SKID_LIMIT;
+		ar->max_num_stations = TARGET_NUM_STATIONS;
+		ar->max_num_vdevs = TARGET_NUM_VDEVS;
+		ar->htt.max_num_pending_tx = TARGET_NUM_MSDU_DESC;
+		ar->fw_stats_req_mask = WMI_STAT_PDEV | WMI_STAT_VDEV |
+			WMI_STAT_PEER;
+		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
+		ar->num_tids = TARGET_NUM_TIDS;
+		break;
+	case ATH10K_FW_WMI_OP_VERSION_10_1:
+		ar->bmiss_offload_max_vdev = TARGET_10X_BMISS_OFFLOAD_MAX_VDEV;
+		ar->skid_limit = TARGET_10X_AST_SKID_LIMIT;
+		ar->num_tids = TARGET_10X_NUM_TIDS;
+		if (test_bit(ATH10K_FW_FEATURE_WMI_10X_CT,
+			     fw_file->fw_features)) {
+			ar->skid_limit = TARGET_10X_AST_SKID_LIMIT_CT;
+			max_num_peers = ath10k_modparam_target_num_peers_ct;
+			ar->max_num_peers = ath10k_modparam_target_num_peers_ct;
+			ar->max_num_stations = TARGET_10X_NUM_STATIONS;
+			ar->max_num_vdevs = ath10k_modparam_target_num_vdevs_ct;
+			ar->htt.max_num_pending_tx = ath10k_modparam_target_num_msdu_desc_ct;
+		} else {
+			max_num_peers = TARGET_10X_NUM_PEERS;
+			ar->max_num_peers = TARGET_10X_NUM_PEERS;
+			ar->max_num_stations = TARGET_10X_NUM_STATIONS;
+			ar->max_num_vdevs = TARGET_10X_NUM_VDEVS;
+			ar->htt.max_num_pending_tx = TARGET_10X_NUM_MSDU_DESC;
+		}
+		ar->fw_stats_req_mask = WMI_STAT_PEER;
+		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
+		break;
+	case ATH10K_FW_WMI_OP_VERSION_10_2:
+	case ATH10K_FW_WMI_OP_VERSION_10_2_4:
+		if (ath10k_peer_stats_enabled(ar)) {
+			max_num_peers = TARGET_10X_TX_STATS_NUM_PEERS;
+			ar->max_num_stations = TARGET_10X_TX_STATS_NUM_STATIONS;
+			ar->num_tids = TARGET_10X_TX_STATS_NUM_TIDS;
+		} else {
+			max_num_peers = TARGET_10X_NUM_PEERS;
+			ar->max_num_stations = TARGET_10X_NUM_STATIONS;
+			ar->num_tids = TARGET_10X_NUM_TIDS;
+		}
+		ar->bmiss_offload_max_vdev = TARGET_10X_BMISS_OFFLOAD_MAX_VDEV;
+		ar->skid_limit = TARGET_10X_AST_SKID_LIMIT;
+		ar->max_num_vdevs = TARGET_10X_NUM_VDEVS;
+		ar->htt.max_num_pending_tx = TARGET_10X_NUM_MSDU_DESC;
+
+		if (test_bit(ATH10K_FW_FEATURE_WMI_10X_CT,
+			     fw_file->fw_features)) {
+			ar->max_num_peers = ath10k_modparam_target_num_peers_ct;
+			ar->max_num_vdevs = ath10k_modparam_target_num_vdevs_ct;
+			ar->htt.max_num_pending_tx = ath10k_modparam_target_num_msdu_desc_ct;
+		}
+		ar->fw_stats_req_mask = WMI_STAT_PEER;
+		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
+		break;
+	case ATH10K_FW_WMI_OP_VERSION_TLV:
+		max_num_peers = TARGET_TLV_NUM_PEERS;
+		ar->bmiss_offload_max_vdev = TARGET_10X_BMISS_OFFLOAD_MAX_VDEV;
+		ar->max_num_stations = TARGET_TLV_NUM_STATIONS;
+		ar->max_num_vdevs = TARGET_TLV_NUM_VDEVS;
+		ar->max_num_tdls_vdevs = TARGET_TLV_NUM_TDLS_VDEVS;
+		if (ar->hif.bus == ATH10K_BUS_SDIO)
+			ar->htt.max_num_pending_tx =
+				TARGET_TLV_NUM_MSDU_DESC_HL;
+		else
+			ar->htt.max_num_pending_tx = TARGET_TLV_NUM_MSDU_DESC;
+		ar->wow.max_num_patterns = TARGET_TLV_NUM_WOW_PATTERNS;
+		ar->fw_stats_req_mask = WMI_TLV_STAT_PDEV | WMI_TLV_STAT_VDEV |
+			WMI_TLV_STAT_PEER | WMI_TLV_STAT_PEER_EXTD;
+		ar->max_spatial_stream = WMI_MAX_SPATIAL_STREAM;
+		ar->wmi.mgmt_max_num_pending_tx = TARGET_TLV_MGMT_NUM_MSDU_DESC;
+		break;
+	case ATH10K_FW_WMI_OP_VERSION_10_4:
+		max_num_peers = TARGET_10_4_NUM_PEERS;
+		ar->bmiss_offload_max_vdev = TARGET_10_4_BMISS_OFFLOAD_MAX_VDEV;
+		ar->skid_limit = TARGET_10_4_AST_SKID_LIMIT;
+		ar->max_num_stations = TARGET_10_4_NUM_STATIONS;
+		ar->num_active_peers = TARGET_10_4_ACTIVE_PEERS;
+		ar->max_num_vdevs = TARGET_10_4_NUM_VDEVS;
+		ar->num_tids = TARGET_10_4_TGT_NUM_TIDS;
+		ar->fw_stats_req_mask = WMI_10_4_STAT_PEER |
+					WMI_10_4_STAT_PEER_EXTD |
+					WMI_10_4_STAT_VDEV_EXTD;
+		ar->max_spatial_stream = ar->hw_params.max_spatial_stream;
+		ar->max_num_tdls_vdevs = TARGET_10_4_NUM_TDLS_VDEVS;
+
+		if (test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL,
+			     fw_file->fw_features))
+			ar->htt.max_num_pending_tx = TARGET_10_4_NUM_MSDU_DESC_PFC;
+		else
+			ar->htt.max_num_pending_tx = TARGET_10_4_NUM_MSDU_DESC;
+
+		break;
+	case ATH10K_FW_WMI_OP_VERSION_UNSET:
+	case ATH10K_FW_WMI_OP_VERSION_MAX:
+	default:
+		WARN_ON(1);
+		return -EINVAL;
+	}
+
+	if (ar->hw_params.num_peers)
+		ar->max_num_peers = ar->hw_params.num_peers;
+	else
+		ar->max_num_peers = max_num_peers;
+
+	ar->request_ct_sta = ath10k_modparam_ct_sta;
+	ar->request_nohwcrypt = ath10k_modparam_nohwcrypt;
+	ar->request_nobeamform_mu = ath10k_modparam_nobeamform_mu;
+	ar->request_nobeamform_su = ath10k_modparam_nobeamform_su;
+	ar->num_ratectrl_objs = ath10k_modparam_target_num_rate_ctrl_objs_ct;
+	ar->eeprom_regdom = _modparam_override_eeprom_regdomain;
+
+	/* Apply user-specified over-rides, if any. */
+	if (ar->fwcfg.flags & ATH10K_FWCFG_VDEVS)
+		ar->max_num_vdevs = ar->fwcfg.vdevs;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_PEERS)
+		ar->max_num_peers = ar->fwcfg.peers;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_STATIONS)
+		ar->max_num_stations = ar->fwcfg.stations;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_NOHWCRYPT)
+		ar->request_nohwcrypt = ar->fwcfg.nohwcrypt;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_CT_STA)
+		ar->request_ct_sta = ar->fwcfg.ct_sta_mode;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_NOBEAMFORM_MU)
+		ar->request_nobeamform_mu = ar->fwcfg.nobeamform_mu;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_NOBEAMFORM_SU)
+		ar->request_nobeamform_su = ar->fwcfg.nobeamform_su;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_RATE_CTRL_OBJS)
+		ar->num_ratectrl_objs = ar->fwcfg.rate_ctrl_objs;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_TX_DESC)
+		ar->htt.max_num_pending_tx = ar->fwcfg.tx_desc;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_MAX_NSS)
+		ar->max_spatial_stream = ar->fwcfg.max_nss;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_NUM_TIDS)
+		ar->num_tids = ar->fwcfg.num_tids;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_ACTIVE_PEERS)
+		ar->num_active_peers = ar->fwcfg.active_peers;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_SKID_LIMIT)
+		ar->skid_limit = ar->fwcfg.skid_limit;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_REGDOM)
+		ar->eeprom_regdom = ar->fwcfg.regdom;
+	if (ar->fwcfg.flags & ATH10K_FWCFG_BMISS_VDEVS)
+		ar->bmiss_offload_max_vdev = ar->fwcfg.bmiss_vdevs;
+
+	if (!(test_bit(ATH10K_FLAG_RAW_MODE, &ar->dev_flags))) {
+		/* Don't disable raw-mode hack, but otherwise allow override */
+		if (ar->fwcfg.flags & ATH10K_FWCFG_MAX_AMSDUS)
+			ar->htt.max_num_amsdu = ar->fwcfg.max_amsdus;
+	}
+
+	/* Some firmware may compile out beacon-miss logic to save firmware RAM
+	 * and instruction RAM.
+	 */
+	if (test_bit(ATH10K_FW_FEATURE_NO_BMISS_CT, fw_file->fw_features))
+		ar->bmiss_offload_max_vdev = 0;
+
+	/* CT Firmware for 9984 & 9980 recently gained support for configuring the number
+	 * of rate-ctrl objects.  Unfortunately, the old default we were using (10)
+	 * is too large if we are also maxing out 64-vdevs.  So, in order to make
+	 * this more backwards compat, add a hack here.
+	 */
+	if ((ar->fwcfg.vdevs == 64) && (ar->fwcfg.rate_ctrl_objs == 10)
+	    && ((ar->hw_rev == ATH10K_HW_QCA9984) || (ar->hw_rev == ATH10K_HW_QCA99X0))) {
+		ath10k_err(ar, "Detected fwcfg of 64 vdevs and 10 RC for 9980/84, setting to 7 RC objects so firmware will not OOM.\n");
+		ar->num_ratectrl_objs = 7;
 	}
 
 	return 0;
@@ -2520,11 +3149,13 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 {
 	int status;
 	u32 val;
+	u32 i, band;
 
 	lockdep_assert_held(&ar->conf_mutex);
 
 	clear_bit(ATH10K_FLAG_CRASH_FLUSH, &ar->dev_flags);
 
+	ar->ok_tx_rate_status = false;
 	ar->running_fw = fw;
 
 	if (!test_bit(ATH10K_FW_FEATURE_NON_BMI,
@@ -2789,6 +3420,163 @@ int ath10k_core_start(struct ath10k *ar, enum ath10k_firmware_mode mode,
 	if (status && status != -EOPNOTSUPP) {
 		ath10k_warn(ar, "set traget log mode faileds: %d\n", status);
 		goto err_hif_stop;
+	}
+
+	if (test_bit(ATH10K_FW_FEATURE_HTT_MGT_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+		ar->ct_all_pkts_htt = true;
+	}
+	else if (ar->running_fw->fw_file.wmi_op_version != ATH10K_FW_WMI_OP_VERSION_10_1) {
+		/* Older 10.1 firmware will not have the flag, and we check the HTT version
+		 * in htt_rx.c for it.  But, 10.4 has conflicting HTT version, so disable
+		 * this feature in newer firmware unless it explicitly has the HTT_MGT_CT feature
+		 * flag.
+		 */
+		ar->ct_all_pkts_htt = false;
+	}
+
+	if (test_bit(ATH10K_FW_FEATURE_SET_SPECIAL_CT,
+		     ar->running_fw->fw_file.fw_features)) {
+		/* Apply user-supplied configuration changes. */
+		/* Don't worry about failures..not much we can do, and not worth failing init even
+		 * if this fails.
+		 */
+
+		for (band = 0; band < 2; band++) {
+			u32 val;
+			for (i = 0; i<MIN_CCA_PWR_COUNT; i++) {
+				val = (band << 24) | (i << 16) | ar->eeprom_overrides.bands[band].minCcaPwrCT[i];
+				ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_NOISE_FLR_THRESH, val);
+			}
+
+			i = 4; /* enable-minccapwr-thresh type */
+			val = (band << 24) | (i << 16) | ar->eeprom_overrides.bands[band].enable_minccapwr_thresh;
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_NOISE_FLR_THRESH, val);
+		}
+
+		if (ar->eeprom_overrides.reg_ack_cts) {
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_ACK_CTS,
+						    ar->eeprom_overrides.reg_ack_cts);
+		}
+
+		if (ar->eeprom_overrides.reg_ifs_slot) {
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_SLOT,
+						    ar->eeprom_overrides.reg_ifs_slot);
+		}
+
+		/* TODO:  Should probably be per-band?? */
+		if (ar->eeprom_overrides.thresh62_ext) {
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_THRESH62_EXT,
+						    ar->eeprom_overrides.thresh62_ext);
+		}
+
+		if (ar->eeprom_overrides.allow_ibss_amsdu) {
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_IBSS_AMSDU_OK,
+						    ar->eeprom_overrides.allow_ibss_amsdu);
+		}
+
+		if (ar->eeprom_overrides.tx_hang_cold_reset_ok) {
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_TX_HANG_COLD_RESET,
+						    ar->eeprom_overrides.tx_hang_cold_reset_ok);
+		}
+
+		if (ar->eeprom_overrides.max_txpower != 0xFFFF)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_MAX_TXPOWER,
+						    ar->eeprom_overrides.max_txpower);
+
+		if (ar->eeprom_overrides.rc_rate_max_per_thr)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_RC_MAX_PER_THR,
+						    ar->eeprom_overrides.rc_rate_max_per_thr);
+
+		if (ar->eeprom_overrides.tx_sta_bw_mask)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_STA_TXBW_MASK,
+						    ar->eeprom_overrides.tx_sta_bw_mask);
+
+		if (ar->eeprom_overrides.pdev_xretry_th)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_PDEV_XRETRY_TH,
+						    ar->eeprom_overrides.pdev_xretry_th);
+
+		if (ar->eeprom_overrides.rifs_enable_override)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_RIFS_ENABLE,
+						    ar->eeprom_overrides.rifs_enable_override);
+		if (ar->eeprom_overrides.wmi_wd_keepalive_ms)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_WMI_WD,
+						    ar->eeprom_overrides.wmi_wd_keepalive_ms);
+		if (ar->eeprom_overrides.ct_pshack)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_PSHACK,
+						    ar->eeprom_overrides.ct_pshack);
+		if (ar->eeprom_overrides.ct_csi)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_CSI,
+						    ar->eeprom_overrides.ct_csi);
+		if (ar->eeprom_overrides.rate_bw_disable_mask)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_BW_DISABLE_MASK,
+						    ar->eeprom_overrides.rate_bw_disable_mask);
+		if (ar->eeprom_overrides.txbf_cv_msg)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_TXBF_CV_MSG,
+						    ar->eeprom_overrides.txbf_cv_msg);
+		if (ar->eeprom_overrides.rx_all_mgt)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_RX_ALL_MGT,
+						    ar->eeprom_overrides.rx_all_mgt);
+		if (ar->eeprom_overrides.rc_debug)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_RC_DBG,
+						    ar->eeprom_overrides.rc_debug);
+		if (ar->eeprom_overrides.tx_debug)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_TX_DBG,
+						    ar->eeprom_overrides.tx_debug);
+
+		if (ar->eeprom_overrides.disable_ibss_cca)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_DISABLE_IBSS_CCA,
+						    ar->eeprom_overrides.disable_ibss_cca);
+
+		if (ar->eeprom_overrides.peer_stats_pn)
+			ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_PEER_STATS_PN,
+						    ar->eeprom_overrides.peer_stats_pn);
+
+		if (ar->eeprom_overrides.su_sounding_timer_ms)
+			ath10k_wmi_pdev_set_param(ar, ar->wmi.pdev_param->txbf_sound_period_cmdid,
+						  ar->eeprom_overrides.su_sounding_timer_ms);
+
+		/* See WMI_FWTEST_CMDID in wlan_dev.c in firmware for these hard-coded values. */
+		/* Set default MU sounding period. */
+		if (ar->eeprom_overrides.mu_sounding_timer_ms)
+			ath10k_wmi_pdev_set_fwtest(ar, 81,
+						   ar->eeprom_overrides.mu_sounding_timer_ms);
+
+		if (ar->eeprom_overrides.rc_txbf_probe)
+			ath10k_wmi_pdev_set_fwtest(ar, 20,
+						   ar->eeprom_overrides.rc_txbf_probe);
+
+		for (i = 0; i<ARRAY_SIZE(ar->eeprom_configAddrs); ) {
+			if (ar->eeprom_configAddrs[i]) {
+				#define CONFIG_ADDR_MODE_SHIFT 20
+				int mode = (ar->eeprom_configAddrs[i] >> CONFIG_ADDR_MODE_SHIFT) & 0x3;
+				int count = 1; /* one value applied to both 2G and 5G modes */
+				int q;
+
+				if (mode == 2) /* 2G, 5G value tuple */
+					count = 2;
+				else if (mode == 3) /* 2G_VHT20, 2G_VHT40, 5G_VHT20, 5G_VHT40, 5G_VHT80/160/80+80 */
+					count = 5;
+				ath10k_dbg(ar, ATH10K_DBG_BOOT, "Applying eeprom configAddr[%i]: mode: %d count: %d 0x%08x 0x%08x 0x%08x\n",
+					   i, mode, count, ar->eeprom_configAddrs[i], ar->eeprom_configAddrs[i+1],
+					   (count >= 2) ? ar->eeprom_configAddrs[i+2] : 0);
+
+				ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_EEPROM_CFG_ADDR_A,
+							    ar->eeprom_configAddrs[i]);
+				for (q = 0; q<count; q++) {
+					ath10k_wmi_pdev_set_special(ar, SET_SPECIAL_ID_EEPROM_CFG_ADDR_V,
+								    ar->eeprom_configAddrs[i + q + 1]);
+				}
+
+				i += (count + 1);
+			}
+			else {
+				break;
+			}
+		}
+
+		if (ar->eeprom_overrides.apply_board_power_ctl_table)
+			ath10k_wmi_check_apply_board_power_ctl_table(ar);
 	}
 
 	return 0;
@@ -3074,9 +3862,33 @@ int ath10k_core_register(struct ath10k *ar,
 
 	queue_work(ar->workqueue, &ar->register_work);
 
+#ifdef STANDALONE_CT
+	/* Assume we are compiling for LEDE/OpenWRT if this define is set. --Ben */
+
+	/* OpenWrt requires all PHYs to be initialized to create the
+	 * configuration files during bootup. ath10k violates this
+	 * because it delays the creation of the PHY to a not well defined
+	 * point in the future.
+	 *
+	 * Forcing the work to be done immediately works around this problem
+	 * but may also delay the boot when firmware images cannot be found.
+	 */
+	flush_workqueue(ar->workqueue);
+#endif
+
 	return 0;
 }
 EXPORT_SYMBOL(ath10k_core_register);
+
+void ath10k_core_free_limits(struct ath10k* ar)
+{
+	int i;
+	for (i = 0; i < ARRAY_SIZE(ar->if_comb); i++) {
+		kfree(ar->if_comb[i].limits);
+	}
+	memset(&ar->if_comb, 0, sizeof(ar->if_comb));
+}
+EXPORT_SYMBOL(ath10k_core_free_limits);
 
 void ath10k_core_unregister(struct ath10k *ar)
 {
@@ -3103,6 +3915,8 @@ void ath10k_core_unregister(struct ath10k *ar)
 	ath10k_core_free_firmware_files(ar);
 	ath10k_core_free_board_files(ar);
 
+	ath10k_core_free_limits(ar);
+
 	ath10k_debug_unregister(ar);
 }
 EXPORT_SYMBOL(ath10k_core_unregister);
@@ -3118,6 +3932,9 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 	ar = ath10k_mac_create(priv_size);
 	if (!ar)
 		return NULL;
+
+	ar->eeprom_overrides.max_txpower = 0xFFFF;
+	ar->sta_xretry_kickout_thresh = DEFAULT_ATH10K_KICKOUT_THRESHOLD;
 
 	ar->ath_common.priv = ar;
 	ar->ath_common.hw = ar->hw;
@@ -3211,6 +4028,7 @@ struct ath10k *ath10k_core_create(size_t priv_size, struct device *dev,
 	INIT_WORK(&ar->restart_work, ath10k_core_restart);
 	INIT_WORK(&ar->set_coverage_class_work,
 		  ath10k_core_set_coverage_class_work);
+	INIT_WORK(&ar->stop_scan_work, ath10k_wmi_stop_scan_work);
 
 	init_dummy_netdev(&ar->napi_dev);
 
