@@ -80,6 +80,7 @@
 #define DP83867_PHYCR_FIFO_DEPTH_MAX		0x03
 #define DP83867_PHYCR_FIFO_DEPTH_MASK		GENMASK(15, 14)
 #define DP83867_PHYCR_RESERVED_MASK		BIT(11)
+#define DP83867_PHYCR_SGMII_ENABLE		BIT(11)
 
 /* RGMIIDCTL bits */
 #define DP83867_RGMII_TX_CLK_DELAY_MAX		0xf
@@ -313,31 +314,31 @@ static int dp83867_config_init(struct phy_device *phydev)
 		phy_clear_bits_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4,
 				   BIT(7));
 
+	val = phy_read(phydev, MII_DP83867_PHYCTRL);
+	if (val < 0)
+		return val;
+	val &= ~DP83867_PHYCR_FIFO_DEPTH_MASK;
+	val |= (dp83867->fifo_depth << DP83867_PHYCR_FIFO_DEPTH_SHIFT);
+
+	/* The code below checks if "port mirroring" N/A MODE4 has been
+	 * enabled during power on bootstrap.
+	 *
+	 * Such N/A mode enabled by mistake can put PHY IC in some
+	 * internal testing mode and disable RGMII transmission.
+	 *
+	 * In this particular case one needs to check STRAP_STS1
+	 * register's bit 11 (marked as RESERVED).
+	 */
+
+	bs = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_STRAP_STS1);
+	if (bs & DP83867_STRAP_STS1_RESERVED)
+		val &= ~DP83867_PHYCR_RESERVED_MASK;
+
+	ret = phy_write(phydev, MII_DP83867_PHYCTRL, val);
+	if (ret)
+		return ret;
+
 	if (phy_interface_is_rgmii(phydev)) {
-		val = phy_read(phydev, MII_DP83867_PHYCTRL);
-		if (val < 0)
-			return val;
-		val &= ~DP83867_PHYCR_FIFO_DEPTH_MASK;
-		val |= (dp83867->fifo_depth << DP83867_PHYCR_FIFO_DEPTH_SHIFT);
-
-		/* The code below checks if "port mirroring" N/A MODE4 has been
-		 * enabled during power on bootstrap.
-		 *
-		 * Such N/A mode enabled by mistake can put PHY IC in some
-		 * internal testing mode and disable RGMII transmission.
-		 *
-		 * In this particular case one needs to check STRAP_STS1
-		 * register's bit 11 (marked as RESERVED).
-		 */
-
-		bs = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_STRAP_STS1);
-		if (bs & DP83867_STRAP_STS1_RESERVED)
-			val &= ~DP83867_PHYCR_RESERVED_MASK;
-
-		ret = phy_write(phydev, MII_DP83867_PHYCTRL, val);
-		if (ret)
-			return ret;
-
 		/* If rgmii mode with no internal delay is selected, we do NOT use
 		 * aligned mode as one might expect.  Instead we use the PHY's default
 		 * based on pin strapping.  And the "mode 0" default is to *use*
@@ -373,6 +374,19 @@ static int dp83867_config_init(struct phy_device *phydev)
 			       dp83867->io_impedance);
 
 	if (phydev->interface == PHY_INTERFACE_MODE_SGMII) {
+		val = phy_read(phydev, MII_DP83867_PHYCTRL);
+		if (val < 0) {
+			pr_err("Failed to read PHY Control Register\n");
+			return val;
+		}
+
+		val |= DP83867_PHYCR_SGMII_ENABLE;
+		ret = phy_write(phydev, MII_DP83867_PHYCTRL, val);
+		if (ret) {
+			pr_err("Failed to enable SGMII Mode.\n");
+			return ret;
+		}
+
 		/* For support SPEED_10 in SGMII mode
 		 * DP83867_10M_SGMII_RATE_ADAPT bit
 		 * has to be cleared by software. That
