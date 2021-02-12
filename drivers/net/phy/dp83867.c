@@ -334,14 +334,6 @@ static int dp83867_of_init(struct phy_device *phydev)
 		return -EINVAL;
 	}
 
-	if (phydev->interface == PHY_INTERFACE_MODE_RGMII_ID) {
-		ret = device_create_file(dev, &dev_attr_rgmii_delay);
-		if (ret) {
-			phydev_err(phydev, "failed to create delay sysfs interface\n");
-			return ret;
-		}
-	}
-
 	return 0;
 }
 #else
@@ -351,9 +343,21 @@ static int dp83867_of_init(struct phy_device *phydev)
 }
 #endif /* CONFIG_OF_MDIO */
 
+static void dp83867_remove(struct phy_device *phydev)
+{
+	struct dp83867_private *dp83867 = phydev->priv;
+	struct device *dev = &phydev->mdio.dev;
+
+	device_remove_file(dev, &dev_attr_rgmii_delay);
+
+	kfree(dp83867);
+}
+
 static int dp83867_probe(struct phy_device *phydev)
 {
 	struct dp83867_private *dp83867;
+	struct device *dev = &phydev->mdio.dev;
+	int ret;
 
 	dp83867 = devm_kzalloc(&phydev->mdio.dev, sizeof(*dp83867),
 			       GFP_KERNEL);
@@ -362,6 +366,13 @@ static int dp83867_probe(struct phy_device *phydev)
 
 	phydev->priv = dp83867;
 
+	if (phydev->interface == PHY_INTERFACE_MODE_RGMII_ID) {
+		ret = device_create_file(dev, &dev_attr_rgmii_delay);
+		if (ret) {
+			phydev_err(phydev, "failed to create delay sysfs interface\n");
+			return ret;
+		}
+	}
 
 	return 0;
 }
@@ -541,6 +552,7 @@ static struct phy_driver dp83867_driver[] = {
 		/* PHY_GBIT_FEATURES */
 
 		.probe          = dp83867_probe,
+		.remove         = dp83867_remove,
 		.config_init	= dp83867_config_init,
 		.soft_reset	= dp83867_phy_reset,
 
