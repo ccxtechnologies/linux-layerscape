@@ -1628,7 +1628,7 @@ static void lm90_restore_conf(void *_data)
 
 static int lm90_init_client(struct i2c_client *client, struct lm90_data *data)
 {
-	int config, convrate;
+	int config, convrate, err;
 
 	convrate = lm90_read_reg(client, LM90_REG_R_CONVRATE);
 	if (convrate < 0)
@@ -1646,10 +1646,20 @@ static int lm90_init_client(struct i2c_client *client, struct lm90_data *data)
 
 	lm90_set_convrate(client, data, 500); /* 500ms; 2Hz conversion rate */
 
-	/* Check Temperature Range Select */
+	/* Set Temperature Range to Wide */
 	if (data->kind == adt7461 || data->kind == tmp451) {
-		if (config & 0x04)
-			data->flags |= LM90_FLAG_ADT7461_EXT;
+		if ((config & 0x04) == 0x00) {
+			dev_info(&client->dev, "Enabling wide-range mode.\n");
+			config |= 0x04;
+			err = i2c_smbus_write_byte_data(client,
+							LM90_REG_W_CONFIG1,
+							config);
+			if (err)
+				return err;
+			data->config_orig = config;
+			data->config = config;
+		}
+		data->flags |= LM90_FLAG_ADT7461_EXT;
 	}
 
 	/*
